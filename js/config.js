@@ -1,0 +1,39 @@
+// ═══════════════════════════════════════════════════
+// CONFIG.JS — toggle between demo and live Google Sheets
+// ═══════════════════════════════════════════════════
+
+const CONFIG = {
+  SHEETS_URL: 'https://script.google.com/macros/s/AKfycbxODGz7KEJuVs6TgltzIKvbt0CWkGJ7gONQW9dixd7lu6bG1XfHGfW-vWOseUXKeQIsHg/exec',
+
+  DEMO_MODE: false,
+
+  DEMO_PW:   'pass123',
+  LS_THEME:  'tt_thm',
+  LS_SESSION:'tt_sess',
+  PAGE_SIZE: 20,
+
+  // ── Role credentials ──────────────────────────
+  MANAGER_ID: 'MGR',
+  MANAGER_PW: 'manager2026',
+
+  // Two Team Leader accounts — each is its own login ID/password/
+  // display name, since there are 2 people acting as Team Leader.
+  // Add, remove, or edit entries here directly (same pattern as
+  // MANAGER_ID/MANAGER_PW above — there's no sheet-backed account
+  // system for these two roles, just constants here).
+  TEAM_LEADERS: [
+    { id: 'TL1', pw: 'teamlead123', name: 'Team Leader 1' },
+    { id: 'TL2', pw: 'teamlead456', name: 'Team Leader 2' },
+  ],
+
+  // HR account — same pattern as MANAGER_ID/MANAGER_PW above (a
+  // single constant login, no sheet-backed account system).
+  HR_ID: 'HR',
+  HR_PW: 'hraccess2026',
+
+  // ── App settings ──────────────────────────────
+  CURRENCY:        '₹',
+  OFFICE_START:    '09:30',
+  LUNCH_MINS:      45,
+  EXTENDED_START:  '19:30',
+};
