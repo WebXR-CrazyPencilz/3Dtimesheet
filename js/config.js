@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════
 
 const CONFIG = {
-  SHEETS_URL: 'https://script.google.com/macros/s/AKfycbwoQ5BtdGZv9v4YNpJ1ETuYgRX1I2qjE54uZew0NHUdtZnWjdSCU9s26_iUPeUt-lGVsw/exec',
+  SHEETS_URL: 'https://script.google.com/macros/s/AKfycbzbj_QYJaMZzQCGkUlSsZRUB6W5IiZLM8u1HWWk4GFU2zNj5tzz9mGL3KOuKStB4n9S_g/exec',
 
   DEMO_MODE: false,
 

@@ -71,6 +71,21 @@ let CP_EMPLOYEES      = [];     // [{ id, name, team }] — forwarded by whichev
 // text, etc.) instead of a real date or true empty string — this
 // guards every date input against that, dropping anything that isn't
 // actually a valid ISO date rather than letting the browser complain.
+// Historical Timesheet records and the live Projects list are two
+// separate sheets, hand-maintained/imported independently — a Project
+// ID that's visually identical ("EUZ - 023" vs "EUZ-023", or with
+// stray leading/trailing spaces) can silently fail a strict ===
+// match, making a project's imported historical hours disappear from
+// every panel that relies on the match with no error anywhere. This
+// normalizes both sides the same way before comparing: trims, then
+// collapses/removes whitespace around dashes so spacing variants
+// match. Case-insensitive too, since Project IDs are otherwise plain
+// text with no case-sensitive meaning.
+function sameProjectId(a, b) {
+  const norm = v => String(v ?? '').trim().toLowerCase().replace(/\s*-\s*/g, '-');
+  return norm(a) === norm(b) && norm(a) !== '';
+}
+
 function isoDateOrBlank(v) {
   return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : '';
 }
@@ -1838,7 +1853,7 @@ function getProjectEmployeeTotals(project) {
   // hours — matched by Project ID, not name, since that's what
   // Historical Import records carry.
   CP_HISTORICAL_DATA
-    .filter(h => h.projectId === project.projectId)
+    .filter(h => sameProjectId(h.projectId, project.projectId))
     .forEach(h => {
       totals[h.employeeId] = (totals[h.employeeId] || 0) + (Number(h.totalHours) || 0);
     });
@@ -1935,7 +1950,7 @@ function fmtMonthShort(monthKey) {
 // column was backfilled after work had already begun, or vice versa).
 function getProjectMonthlyTimeline(project) {
   const entries = CP_TIMESHEET_DATA.filter(e => e.project === project.projectName && e.status !== 'Leave');
-  const histRecords = CP_HISTORICAL_DATA.filter(h => h.projectId === project.projectId);
+  const histRecords = CP_HISTORICAL_DATA.filter(h => sameProjectId(h.projectId, project.projectId));
 
   let earliestMonth = null;
   entries.forEach(e => {
@@ -3000,7 +3015,7 @@ async function calculateProjectCost(project) {
   // calls, matching the "reuse existing data flow" rule everywhere
   // else in this file.
   const histRecords = (typeof CP_HISTORICAL_DATA !== 'undefined' ? CP_HISTORICAL_DATA : [])
-    .filter(r => r.projectId === project.projectId);
+    .filter(r => sameProjectId(r.projectId, project.projectId));
   histRecords.forEach(r => {
     const monthNum = HIST_MONTH_NUM[r.month];
     if (!monthNum || !r.year) return;
