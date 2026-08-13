@@ -13,7 +13,6 @@ const CONFIG = {
   PAGE_SIZE: 20,
 
   // ── Role credentials ──────────────────────────
-  MANAGER_ID: 'MGR',
   MANAGER_PW: 'manager2026',
 
   // Two Team Leader accounts — each is its own login ID/password/
