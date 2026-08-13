@@ -1411,10 +1411,12 @@ async function openProjectDetail(content, projectId, opts = {}) {
   // in via edit.
   const canEditCore = isManager || (isNew && isTL);
 
-  // Start Date/End Date are a deliberate exception to canEditCore:
-  // Team Leader can edit these on an EXISTING project too, not just
-  // at creation — everything else stays governed by canEditCore.
-  const canEditDates = isManager || isTL;
+  // Start Date/End Date and Status are deliberate exceptions to
+  // canEditCore: Team Leader can edit these on an EXISTING project
+  // too, not just at creation — everything else (Name/ID/Client/
+  // Views Planned) stays governed by canEditCore.
+  const canEditDates  = isManager || isTL;
+  const canEditStatus = isManager || isTL;
 
   let suggestedId = '';
   if (isNew && isManager) {
@@ -1429,7 +1431,7 @@ async function openProjectDetail(content, projectId, opts = {}) {
       <div style="font-size:11.5px;color:var(--txt2);margin-bottom:1.1rem;">
         ${isNew && isTL ? 'You can create the project. Project Constant/Value are set later by the Manager.'
         : isManager ? 'You can edit project details, status, and view progress.'
-                    : 'You can update Views Completed and Start/End Date. Other project details and status are view-only here — Manager updates those.'}
+                    : 'You can update Views Completed, Start/End Date, and Status. Other project details are view-only here — Manager updates those.'}
       </div>
 
       <div class="cp-form-grid">
@@ -1469,7 +1471,7 @@ async function openProjectDetail(content, projectId, opts = {}) {
 
         <div class="cp-form-field">
           <label class="cp-flabel">Status</label>
-          <select class="cp-finput" id="cpStatus" ${canEditCore ? '' : 'disabled'}>
+          <select class="cp-finput" id="cpStatus" ${canEditStatus ? '' : 'disabled'}>
             ${CP_STATUSES.map(s => `<option value="${s}" ${s === project.status ? 'selected' : ''}>${s}</option>`).join('')}
           </select>
         </div>
@@ -1742,13 +1744,13 @@ async function saveProjectFromForm(content, isNew, originalProject, onDone) {
     payload.teamLeaderNotes = $('cpTlNotes').value.trim();
   } else {
     // Team Leader editing an EXISTING project — Views Completed,
-    // their own Notes, and now Start/End Date. Everything else
-    // (Name/ID/Client/Constant/Value/Planned/Status) stays
-    // Manager-only.
+    // their own Notes, Start/End Date, and now Status. Everything
+    // else (Name/ID/Client/Constant/Value/Planned) stays Manager-only.
     payload.originalProjectId = originalProject.projectId;
     payload.completedViews    = parseFloat($('cpCompleted').value) || 0;
     payload.startDate         = $('cpStartDate').value;
     payload.endDate           = $('cpEndDate').value;
+    payload.status            = $('cpStatus').value;
     payload.teamLeaderNotes   = $('cpTlNotes').value.trim();
   }
 
