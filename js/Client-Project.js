@@ -64,6 +64,17 @@ let CP_ROLE           = null;   // 'manager' | 'tl' | null
 let CP_CLIENTS        = [];     // [{ id, name }]
 let CP_PROJECTS       = [];     // full project records (fields depend on role — see backend)
 let CP_EMPLOYEES      = [];     // [{ id, name, team }] — forwarded by whichever portal is active
+// Native <input type="date"> throws a console warning (and silently
+// discards the value) if given anything other than a strict
+// YYYY-MM-DD string or empty. project.startDate/endDate have
+// occasionally held a stray placeholder (an ellipsis, blank-marker
+// text, etc.) instead of a real date or true empty string — this
+// guards every date input against that, dropping anything that isn't
+// actually a valid ISO date rather than letting the browser complain.
+function isoDateOrBlank(v) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : '';
+}
+
 let CP_TIMESHEET_DATA = [];     // all employee timesheet entries — forwarded by whichever portal is active
 let CP_MASTER_LOADED  = false;  // did the active portal already forward master data to us?
 
@@ -1465,12 +1476,12 @@ async function openProjectDetail(content, projectId, opts = {}) {
 
         <div class="cp-form-field">
           <label class="cp-flabel">Start Date</label>
-          <input class="cp-finput" id="cpStartDate" type="date" value="${esc(project.startDate)}" ${canEditDates ? '' : 'disabled'}/>
+          <input class="cp-finput" id="cpStartDate" type="date" value="${isoDateOrBlank(project.startDate)}" ${canEditDates ? '' : 'disabled'}/>
         </div>
 
         <div class="cp-form-field">
           <label class="cp-flabel">End Date</label>
-          <input class="cp-finput" id="cpEndDate" type="date" value="${esc(project.endDate)}" ${canEditDates ? '' : 'disabled'}/>
+          <input class="cp-finput" id="cpEndDate" type="date" value="${isoDateOrBlank(project.endDate)}" ${canEditDates ? '' : 'disabled'}/>
         </div>
 
         <div class="cp-form-field">
@@ -1652,6 +1663,28 @@ function startProjectDetailAutoRefresh(content, projectId) {
 // refresh doesn't depend on either portal shell re-running its full
 // startup sequence.
 async function refreshCPTimesheetData() {
+  if (CP_ROLE === 'tl') {
+    // Team Leader: one bulk request, same as teamleader.js's own
+    // initTeamLeader(). Firing N parallel apiGetAllHistory calls here
+    // (the old per-employee pattern) on a repeating 60s timer was
+    // silently degrading data on every cycle — any employee whose
+    // call timed out under that burst had their hours replaced with
+    // an empty array via .catch(() => []), even though the correct
+    // data was already sitting in CP_TIMESHEET_DATA from the initial
+    // load. A single getTLData call carries no such risk.
+    try {
+      const data = await sheetGET({ action: 'getTLData' });
+      CP_TIMESHEET_DATA = Array.isArray(data.entries) ? data.entries : [];
+    } catch(e) {
+      // Leave CP_TIMESHEET_DATA as whatever it already was — a failed
+      // refresh should never wipe out good data, same principle as
+      // the per-employee .catch(() => []) below was supposed to (but
+      // didn't, in aggregate) achieve.
+      console.warn('[client-project] TL timesheet refresh failed, keeping existing data:', e.message);
+    }
+    return;
+  }
+
   if (!CP_EMPLOYEES.length) return;
   const results = await Promise.all(
     CP_EMPLOYEES.map(emp =>
@@ -2038,13 +2071,34 @@ function renderProjectTimelineSection(project) {
   el.innerHTML = `
     <div class="cp-card">
       <div style="font-weight:700;font-size:14px;color:var(--txt1);margin-bottom:1rem;">📅 Project Timeline</div>
-      <div style="display:flex;align-items:center;gap:12px;">
-        <span style="flex:0 0 84px;font-size:10px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;">Total</span>
-        <div style="flex:1;min-width:0;height:16px;background:var(--surface2);border-radius:8px;overflow:hidden;display:flex;">
-          ${segmentsHtml}
+      <details>
+        <summary style="display:flex;align-items:center;gap:12px;cursor:pointer;list-style:none;">
+          <span style="flex:0 0 84px;font-size:10px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;display:flex;align-items:center;gap:4px;">
+            <span class="cp-cost-arrow" style="font-size:9px;transition:transform .15s;">▶</span>
+            Total
+          </span>
+          <div style="flex:1;min-width:0;height:16px;background:var(--surface2);border-radius:8px;overflow:hidden;display:flex;">
+            ${segmentsHtml}
+          </div>
+          <span style="flex:0 0 84px;text-align:right;font-size:13px;font-weight:700;color:var(--txt1);white-space:nowrap;">${fmtHM(totalHours)}</span>
+        </summary>
+        <div style="margin-top:10px;padding-left:96px;display:flex;flex-direction:column;gap:4px;">
+          ${totals.slice().sort((a, b) => b.hours - a.hours).map(t => `
+            <div style="display:flex;align-items:center;justify-content:space-between;font-size:11.5px;
+              padding:5px 8px;background:var(--surface2);border-radius:6px;">
+              <span style="display:flex;align-items:center;gap:6px;color:var(--txt1);font-weight:600;">
+                <span style="width:7px;height:7px;border-radius:50%;background:${getEmployeeColor(t.empId)};flex-shrink:0;"></span>
+                ${esc(t.name)}
+              </span>
+              <span style="color:var(--txt1);font-weight:700;">${fmtHM(t.hours)}</span>
+            </div>`).join('')}
         </div>
-        <span style="flex:0 0 84px;text-align:right;font-size:13px;font-weight:700;color:var(--txt1);white-space:nowrap;">${fmtHM(totalHours)}</span>
-      </div>
+      </details>
+      <style>
+        .cp-cost-arrow { display:inline-block; }
+        details[open] summary .cp-cost-arrow { transform: rotate(90deg); }
+        summary::-webkit-details-marker { display:none; }
+      </style>
       ${moneyHtml}
     </div>`;
 }
@@ -2181,14 +2235,26 @@ function renderProjectTaskSection(project) {
 
     // Label row above the bar — one span per employee, sized to the
     // same width as their segment below so it sits roughly above it,
-    // showing "Name Xh Ym".
+    // showing "Name Xh Ym". Segments below a legibility threshold
+    // (as a % of the FULL row, not just this task's own total) show
+    // no text at all instead of a truncated sliver — with many
+    // narrow segments packed edge-to-edge, two adjacent slivers of
+    // text (e.g. "r..." next to "V") have no visual gap between them
+    // and read as one garbled merged string. The bar segment right
+    // below still carries the full name/hours in its title tooltip,
+    // so the information isn't lost, just not force-fit into a box
+    // too small to hold it.
+    const LABEL_MIN_ROW_PCT = 6;
     const labelsHtml = hasHours
       ? `<div style="display:flex;width:${fillPct}%;margin-bottom:4px;">
           ${t.employees.map(e => {
             const pct = (e.hours / t.totalHours) * 100;
+            const pctOfFullRow = pct * fillPct / 100;
+            const showText = pctOfFullRow >= LABEL_MIN_ROW_PCT;
             return `<div style="width:${pct}%;min-width:0;overflow:hidden;font-size:10px;font-weight:700;
-              color:${getEmployeeColor(e.empId)};white-space:nowrap;text-overflow:ellipsis;padding:0 4px;">
-              ${esc(e.name)} ${fmtHM(e.hours)}
+              color:${getEmployeeColor(e.empId)};white-space:nowrap;text-overflow:ellipsis;padding:0 4px;box-sizing:border-box;"
+              title="${esc(e.name)}: ${fmtHM(e.hours)}">
+              ${showText ? `${esc(e.name)} ${fmtHM(e.hours)}` : ''}
             </div>`;
           }).join('')}
         </div>`
@@ -2805,22 +2871,58 @@ async function renderProjectCostSection(project) {
   }
 
   const isProfit = result.profit >= 0;
+
+  // Missing Points means the cost above is understated — de-duplicate
+  // to unique (empName, month) pairs so the same person/month isn't
+  // listed once per timesheet entry.
+  const missingKey = m => `${m.empId}|${m.month}`;
+  const uniqueMissing = [...new Map(result.missingPoints.map(m => [missingKey(m), m])).values()]
+    .sort((a, b) => a.month.localeCompare(b.month) || a.empName.localeCompare(b.empName));
+
+  const missingWarning = uniqueMissing.length === 0 ? '' : `
+    <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:8px;padding:8px 10px;margin-bottom:1rem;font-size:11.5px;color:#92400e;">
+      ⚠️ Cost below is understated — no Salary Points set for:
+      ${uniqueMissing.map(m => `${esc(m.empName)} (${esc(fmtCPMonthLabel(m.month))})`).join(', ')}.
+      Set Points on the Salary tab to include their hours in the cost.
+    </div>`;
+
   el.innerHTML = `
     <div class="cp-card">
       <div style="font-weight:700;font-size:14px;color:var(--txt1);margin-bottom:.9rem;">💰 Project Cost &amp; Profit</div>
+      ${missingWarning}
 
       ${result.months.length === 0
         ? `<div style="font-size:12.5px;color:var(--txt2);">No timesheet hours logged against this project yet.</div>`
         : `
         <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:1rem;">
           ${result.months.map(m => `
-            <div style="display:flex;align-items:center;justify-content:space-between;font-size:12px;
-              padding:6px 0;border-bottom:1px solid var(--border);">
-              <span style="color:var(--txt2);">${esc(fmtCPMonthLabel(m.month))}</span>
-              <span style="color:var(--txt2);">${m.hours.toFixed(1)}h</span>
-              <span style="color:var(--txt1);font-weight:700;">${fmtCPConstant(m.cost)}</span>
-            </div>`).join('')}
-        </div>`}
+            <details style="background:var(--surface2);border-radius:7px;">
+              <summary style="display:flex;align-items:center;justify-content:space-between;font-size:12px;
+                padding:6px 8px;cursor:pointer;list-style:none;">
+                <span style="display:flex;align-items:center;gap:5px;color:var(--txt1);font-weight:600;">
+                  <span class="cp-cost-arrow" style="font-size:9px;color:var(--txt2);transition:transform .15s;">▶</span>
+                  ${esc(fmtCPMonthLabel(m.month))}
+                  <span style="color:var(--txt2);font-weight:400;">· ${m.employees.length} employee${m.employees.length !== 1 ? 's' : ''}</span>
+                </span>
+                <span style="color:var(--txt2);">${m.hours.toFixed(1)}h</span>
+                <span style="color:var(--txt1);font-weight:700;">${fmtCPConstant(m.cost)}</span>
+              </summary>
+              <div style="padding:2px 8px 8px 25px;display:flex;flex-direction:column;gap:2px;">
+                ${m.employees.map(e => `
+                  <div style="display:flex;align-items:center;justify-content:space-between;font-size:11px;
+                    padding:4px 0;border-top:1px solid var(--border);">
+                    <span style="color:var(--txt1);font-weight:600;">${esc(e.name)}</span>
+                    <span style="color:var(--txt2);">${e.hours.toFixed(1)}h</span>
+                    <span style="color:var(--txt1);font-weight:600;">${fmtCPConstant(e.cost)}</span>
+                  </div>`).join('')}
+              </div>
+            </details>`).join('')}
+        </div>
+        <style>
+          .cp-cost-arrow { display:inline-block; }
+          details[open] summary .cp-cost-arrow { transform: rotate(90deg); }
+          summary::-webkit-details-marker { display:none; }
+        </style>`}
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
         <div style="background:var(--surface2);border-radius:10px;padding:10px 12px;">
@@ -2910,16 +3012,31 @@ async function calculateProjectCost(project) {
 
   const months = Object.keys(byMonth).sort();
   let totalCost = 0;
+  const missingPoints = []; // [{ empId, empName, month }] — Points never set, silently counted as 0 cost
+  const byEmployee = {}; // { empId: { name, hours, cost, months: [{month, hours, cost}] } } — same hours×points math, both summed per employee AND kept per-month for the expandable breakdown
   const monthBreakdown = months.map(month => {
     let monthCost = 0;
     let monthHours = 0;
+    const monthEmployees = []; // this month's per-employee breakdown, for the month-first expandable view
     Object.entries(byMonth[month]).forEach(([empId, hours]) => {
       monthHours += hours;
-      const points = getMonthlyPointsForEmployee(empId, month);
-      monthCost += hours * points;
+      const empName = (typeof MGR_EMPLOYEES !== 'undefined' ? MGR_EMPLOYEES.find(e => e.id === empId)?.name : null) || empId;
+      const points = getMonthlyPointsForEmployee(empId, month, empName);
+      if (points === 0) {
+        missingPoints.push({ empId, empName, month });
+      }
+      const cost = hours * points;
+      monthCost += cost;
+      monthEmployees.push({ empId, name: empName, hours, cost });
+
+      if (!byEmployee[empId]) byEmployee[empId] = { empId, name: empName, hours: 0, cost: 0, months: [] };
+      byEmployee[empId].hours += hours;
+      byEmployee[empId].cost  += cost;
+      byEmployee[empId].months.push({ month, hours, cost });
     });
     totalCost += monthCost;
-    return { month, hours: monthHours, cost: monthCost };
+    monthEmployees.sort((a, b) => b.cost - a.cost);
+    return { month, hours: monthHours, cost: monthCost, employees: monthEmployees };
   });
 
   // Project Constant is the project's allocated budget/value — this
@@ -2928,15 +3045,16 @@ async function calculateProjectCost(project) {
   // separate field kept for reference but not used in this formula.
   const totalHours   = monthBreakdown.reduce((s, m) => s + m.hours, 0);
   const projectBudget = parseFloat(project.projectConstant) || 0;
-  return { months: monthBreakdown, totalCost, totalHours, projectBudget, profit: projectBudget - totalCost };
+  const employeeCosts = Object.values(byEmployee).sort((a, b) => b.cost - a.cost);
+  return { months: monthBreakdown, totalCost, totalHours, projectBudget, profit: projectBudget - totalCost, missingPoints, employeeCosts };
 }
 
 // Looks up an employee's Points for one specific month via salary.js's
 // own carry-forward logic — the exact same number the Salary tab
 // itself would show for that employee that month.
-function getMonthlyPointsForEmployee(empId, month) {
+function getMonthlyPointsForEmployee(empId, month, empName) {
   if (typeof getEffectiveSalary !== 'function') return 0;
-  const eff = getEffectiveSalary(empId, month);
+  const eff = getEffectiveSalary(empId, month, empName);
   return eff && eff.record ? (parseFloat(eff.record.points) || 0) : 0;
 }
 

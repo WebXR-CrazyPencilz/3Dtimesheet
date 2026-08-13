@@ -308,6 +308,20 @@ async function apiGetAllHistory(uid) {
   return Array.isArray(data) ? data : [];
 }
 
+// ── UPDATE EMPLOYEE RECORD (HR portal — Manage Employees) ─
+// Was called from humanresource.js but never defined here, so every
+// save on the Manage Employees screen failed immediately with
+// "apiUpdateEmployeeRecord is not defined" before the request ever
+// reached the network. createEmployee has no such wrapper either —
+// humanresource.js calls sheetGET directly for that one — but this
+// call site expects a named function, so it needs one.
+async function apiUpdateEmployeeRecord(data) {
+  return sheetGET({
+    action: 'updateEmployeeRecord',
+    data:   encodeURIComponent(JSON.stringify(data)),
+  });
+}
+
 // ── LEGACY COMPAT ─────────────────────────────────
 async function apiLoadEntries(uid) {
   return apiGetHistory(uid);

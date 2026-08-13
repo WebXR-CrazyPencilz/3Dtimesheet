@@ -763,6 +763,13 @@ function fmtGanttDate(dateStr) {
 // same way the Attendance grid's Force Entry hand-off does, so this
 // works correctly regardless of which portal opened it.
 function openGanttProjectDetail(projectId) {
+  // The tooltip is appended to document.body, not inside the row it
+  // was shown for — clicking a row to navigate here replaces the
+  // row's DOM before mouseleave ever fires, so without this the
+  // tooltip is orphaned and stays floating on top of the page we're
+  // about to open.
+  hideGanttTooltip();
+
   const portalRoot = GANTT_CONTAINER.closest('#mgrApp, #tlApp');
   const portalId    = portalRoot ? portalRoot.id : 'mgrApp';
   const tabContent  = portalRoot ? portalRoot.querySelector('#mgrTabContent, #tlTabContent') : GANTT_CONTAINER;

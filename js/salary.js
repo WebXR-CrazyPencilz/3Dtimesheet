@@ -209,7 +209,7 @@ function renderSalTimeline(content) {
 }
 
 function buildSalMonthCard(emp, monthKey) {
-  const effective  = getEffectiveSalary(emp.id, monthKey);
+  const effective  = getEffectiveSalary(emp.id, monthKey, emp.name);
   const monthLabel = new Date(monthKey + '-01').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
   const monthShort = monthLabel.split(' ')[0];
 
@@ -261,9 +261,28 @@ function buildSalMonthCard(emp, monthKey) {
 // this employee up to that point. Nothing is stored for inherited
 // months — this is computed fresh every time, so a later edit to an
 // earlier month can never silently be undone by stale duplicate rows.
-function getEffectiveSalary(empId, monthKey) {
+function getEffectiveSalary(empId, monthKey, empName) {
+  // Matching is deliberately loose here: trimmed + case-insensitive,
+  // and checks BOTH r.empId and r.empName against BOTH the ID and
+  // name we were given. Some existing SalaryPivotView rows predate
+  // the current save convention and may have a name where an ID was
+  // expected (or vice versa), plus real-world sheets pick up stray
+  // whitespace/casing differences from manual edits or copy-paste.
+  // A strict `r.empId === empId` match silently returns nothing for
+  // any of that — this widened match finds the record either way,
+  // and has no effect on a row that already matches cleanly, since
+  // that's still the first thing checked.
+  const norm = v => String(v ?? '').trim().toLowerCase();
+  const empIdN   = norm(empId);
+  const empNameN = norm(empName);
   const recs = SAL_RECORDS
-    .filter(r => r.empId === empId && r.month <= monthKey)
+    .filter(r => {
+      const rEmpIdN   = norm(r.empId);
+      const rEmpNameN = norm(r.empName);
+      const idMatches   = rEmpIdN && (rEmpIdN === empIdN || (empNameN && rEmpIdN === empNameN));
+      const nameMatches = rEmpNameN && (rEmpNameN === empIdN || (empNameN && rEmpNameN === empNameN));
+      return (idMatches || nameMatches) && r.month <= monthKey;
+    })
     .sort((a, b) => b.month.localeCompare(a.month));
   if (!recs.length) return null;
   const record = recs[0];
@@ -278,7 +297,7 @@ function getEffectiveSalary(empId, monthKey) {
 
 // ── EDITOR MODAL ──────────────────────────────────────────────
 function openSalaryEditor(content, emp, monthKey) {
-  const effective  = getEffectiveSalary(emp.id, monthKey);
+  const effective  = getEffectiveSalary(emp.id, monthKey, emp.name);
   const monthLabel = new Date(monthKey + '-01').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
   const cur = effective ? effective.record : { lpa: '', monthly: '', hourly: '', points: '', workHours: '' };
 
