@@ -322,6 +322,14 @@ async function apiUpdateEmployeeRecord(data) {
   });
 }
 
+// ── CHANGE OWN PASSWORD (Employee portal — self-service) ─
+async function apiChangeOwnPassword(uid, currentPw, newPw) {
+  return sheetGET({
+    action: 'changeOwnPassword',
+    data:   encodeURIComponent(JSON.stringify({ uid, currentPw, newPw })),
+  });
+}
+
 // ── LEGACY COMPAT ─────────────────────────────────
 async function apiLoadEntries(uid) {
   return apiGetHistory(uid);

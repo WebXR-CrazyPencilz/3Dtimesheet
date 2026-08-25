@@ -334,6 +334,83 @@ async function loginAsHR(emp, silent = false) {
 }
 
 // ── LOGOUT ────────────────────────────────────────
+// ── CHANGE PASSWORD (Employee portal — self-service only) ─────────
+// Deliberately only wired up in the Employee portal's topbar (see
+// index.html) — Manager/Team Leader/HR accounts are constants in
+// config.js, not rows in the Employees sheet, so this feature has no
+// meaning for them and isn't offered there. Requires the current
+// password to be entered correctly server-side (see Code.gs's
+// changeOwnPassword) before anything changes.
+function openChangePasswordModal() {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);'
+    + 'display:flex;align-items:center;justify-content:center;z-index:9999;';
+  overlay.innerHTML = `
+    <div style="background:var(--surface1);border:1px solid var(--border-md);
+      border-radius:14px;padding:1.25rem;width:340px;max-width:92vw;">
+      <div style="font-weight:700;font-size:15px;color:var(--txt1);margin-bottom:2px;">🔒 Change Password</div>
+      <div style="font-size:12px;color:var(--txt2);margin-bottom:12px;">${esc(USER ? USER.name : '')}</div>
+
+      <label style="font-size:11px;color:var(--txt2);font-weight:600;display:block;margin:10px 0 4px;">Current Password</label>
+      <input id="cpwCurrent" type="password" autocomplete="current-password" placeholder="Enter current password"
+        style="width:100%;background:var(--inp);border:1px solid var(--inp-b);border-radius:7px;
+          color:var(--txt);font-size:12.5px;padding:8px 10px;box-sizing:border-box;font-family:inherit;"/>
+
+      <label style="font-size:11px;color:var(--txt2);font-weight:600;display:block;margin:10px 0 4px;">New Password</label>
+      <input id="cpwNew" type="password" autocomplete="new-password" placeholder="At least 4 characters"
+        style="width:100%;background:var(--inp);border:1px solid var(--inp-b);border-radius:7px;
+          color:var(--txt);font-size:12.5px;padding:8px 10px;box-sizing:border-box;font-family:inherit;"/>
+
+      <label style="font-size:11px;color:var(--txt2);font-weight:600;display:block;margin:10px 0 4px;">Confirm New Password</label>
+      <input id="cpwConfirm" type="password" autocomplete="new-password" placeholder="Re-enter new password"
+        style="width:100%;background:var(--inp);border:1px solid var(--inp-b);border-radius:7px;
+          color:var(--txt);font-size:12.5px;padding:8px 10px;box-sizing:border-box;font-family:inherit;"/>
+
+      <div id="cpwErr" style="display:none;font-size:11.5px;color:var(--err);margin-top:8px;"></div>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button id="cpwCancel" style="background:none;border:1px solid var(--border-md);
+          color:var(--txt2);border-radius:7px;padding:7px 14px;font-size:12.5px;font-weight:600;cursor:pointer;">Cancel</button>
+        <button id="cpwSubmit" style="background:var(--a1);border:none;
+          color:#fff;border-radius:7px;padding:7px 14px;font-size:12.5px;font-weight:700;cursor:pointer;">Change Password</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const errEl = overlay.querySelector('#cpwErr');
+  const showErr = msg => { errEl.textContent = msg; errEl.style.display = 'block'; };
+
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  overlay.querySelector('#cpwCancel').addEventListener('click', () => overlay.remove());
+
+  overlay.querySelector('#cpwSubmit').addEventListener('click', async () => {
+    const currentPw = overlay.querySelector('#cpwCurrent').value;
+    const newPw     = overlay.querySelector('#cpwNew').value;
+    const confirmPw = overlay.querySelector('#cpwConfirm').value;
+
+    errEl.style.display = 'none';
+
+    if (!currentPw) { showErr('Enter your current password.'); return; }
+    if (newPw.length < 4) { showErr('New password must be at least 4 characters.'); return; }
+    if (newPw !== confirmPw) { showErr('New password and confirmation do not match.'); return; }
+    if (newPw === currentPw) { showErr('New password must be different from the current one.'); return; }
+
+    const btn = overlay.querySelector('#cpwSubmit');
+    btn.disabled = true;
+    btn.textContent = 'Changing…';
+
+    try {
+      await apiChangeOwnPassword(USER.id, currentPw, newPw);
+      toast?.('s', 'Password changed', 'Use your new password next time you sign in.');
+      overlay.remove();
+    } catch(err) {
+      showErr(err.message || 'Failed to change password.');
+      btn.disabled = false;
+      btn.textContent = 'Change Password';
+    }
+  });
+}
+
 function logout() {
   sessionStorage.removeItem(CONFIG.LS_SESSION);
   USER = null; ENTRIES = []; MANAGER_MODE = false; TL_MODE = false; HR_MODE = false;

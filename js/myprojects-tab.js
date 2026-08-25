@@ -760,13 +760,14 @@ function renderMyAttendanceGrid() {
   // (leaveDays/workingDays/totalHours/permissionHours) — computed
   // here across the visible range so Leave days are visible even
   // when they don't happen to fall in view row-by-row.
-  let leaveDays = 0, workingDays = 0, totalHours = 0, permissionHours = 0;
+  let leaveDays = 0, workingDays = 0, totalHours = 0, permissionHours = 0, overtimeHours = 0;
   const statuses = dates.map(d => ({ date: d, status: myAttendGetDayStatus(d) }));
   statuses.forEach(({ status }) => {
     if (status.kind === 'worked') {
       workingDays++;
       totalHours += status.hours;
       permissionHours += status.permissionHours || 0;
+      if (status.hours > MYATT_OVERTIME_THRESHOLD_HOURS) overtimeHours += status.hours - MYATT_OVERTIME_THRESHOLD_HOURS;
       if (status.hasLeave) leaveDays++;
     } else if (status.kind === 'leave') {
       leaveDays++;
@@ -791,6 +792,10 @@ function renderMyAttendanceGrid() {
       <div>
         <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;">Total Hours</div>
         <div style="font-size:14px;font-weight:700;color:var(--a1);">${esc(fmtMyProjHours(totalHours))}</div>
+      </div>
+      <div>
+        <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;">OT Hours</div>
+        <div style="font-size:14px;font-weight:700;color:${overtimeHours > 0 ? '#92400e' : 'var(--txt1)'};">${overtimeHours > 0 ? '⚡ ' + esc(fmtMyProjHours(overtimeHours)) : '—'}</div>
       </div>
     </div>`;
 
