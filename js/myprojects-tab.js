@@ -619,7 +619,11 @@ function loadMyAttendanceTab() {
         background:var(--surface2);border:1px solid var(--border);border-radius:6px;
         color:var(--txt1);font-size:12px;padding:6px 8px;cursor:pointer;">
         ${monthOptions.map(m => `<option value="${m.key}" ${m.key === MYATT_MONTH ? 'selected' : ''}>${m.label}</option>`).join('')}
-      </select>`;
+      </select>
+      <button id="myAttendExportPdf" style="background:var(--elevated);color:var(--txt1);border:1px solid var(--border-md);
+        border-radius:6px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:6px;">
+        ⬇ Export PDF
+      </button>`;
     bar.dataset.wired = '1';
     bar.querySelector('#myAttendR15').addEventListener('click', () => {
       MYATT_RANGE_MODE = '15days';
@@ -635,6 +639,7 @@ function loadMyAttendanceTab() {
       MYATT_MONTH = e.target.value;
       renderMyAttendanceGrid();
     });
+    bar.querySelector('#myAttendExportPdf').addEventListener('click', () => myAttendExportPDF());
   }
 
   // Ensure this employee's history is loaded — reuse the same cache
@@ -760,14 +765,13 @@ function renderMyAttendanceGrid() {
   // (leaveDays/workingDays/totalHours/permissionHours) — computed
   // here across the visible range so Leave days are visible even
   // when they don't happen to fall in view row-by-row.
-  let leaveDays = 0, workingDays = 0, totalHours = 0, permissionHours = 0, overtimeHours = 0;
+  let leaveDays = 0, workingDays = 0, totalHours = 0, permissionHours = 0;
   const statuses = dates.map(d => ({ date: d, status: myAttendGetDayStatus(d) }));
   statuses.forEach(({ status }) => {
     if (status.kind === 'worked') {
       workingDays++;
       totalHours += status.hours;
       permissionHours += status.permissionHours || 0;
-      if (status.hours > MYATT_OVERTIME_THRESHOLD_HOURS) overtimeHours += status.hours - MYATT_OVERTIME_THRESHOLD_HOURS;
       if (status.hasLeave) leaveDays++;
     } else if (status.kind === 'leave') {
       leaveDays++;
@@ -793,10 +797,6 @@ function renderMyAttendanceGrid() {
         <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;">Total Hours</div>
         <div style="font-size:14px;font-weight:700;color:var(--a1);">${esc(fmtMyProjHours(totalHours))}</div>
       </div>
-      <div>
-        <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;">OT Hours</div>
-        <div style="font-size:14px;font-weight:700;color:${overtimeHours > 0 ? '#92400e' : 'var(--txt1)'};">${overtimeHours > 0 ? '⚡ ' + esc(fmtMyProjHours(overtimeHours)) : '—'}</div>
-      </div>
     </div>`;
 
   // Most recent date first — same convention as the Daily Notes list
@@ -809,6 +809,99 @@ function renderMyAttendanceGrid() {
     <div style="background:var(--surface1);border:1px solid var(--border);border-radius:12px;padding:.4rem .4rem;">
       ${rowsHtml}
     </div>`;
+}
+
+// Opens a print-ready window with this employee's own attendance for
+// the currently-selected range (Last 15 Days / Month Wise) — same
+// window.open + window.print() pattern as the Manager/HR Attendance
+// grid's exportAttendanceToPDF() in Client-Project-Attendance.js, ​
+// just built from a plain Date/Status/Time/Hours table instead of
+// that grid's wide date-columns layout, since My Attendance is
+// already a vertical list rather than a calendar grid. Re-derives
+// the same dates/status/totals renderMyAttendanceGrid() just used —
+// cheap (pure functions over the already-loaded MY_PROJECTS_CACHE),
+// so no need to stash them on a module-level variable.
+function myAttendExportPDF() {
+  const dates = myAttendGetRangeDates();
+  if (!dates.length) { toast?.('e', 'Nothing to export', 'No dates in the current range.'); return; }
+
+  let leaveDays = 0, workingDays = 0, totalHours = 0, permissionHours = 0, overtimeHours = 0;
+  const statuses = dates.map(d => ({ date: d, status: myAttendGetDayStatus(d) }));
+  statuses.forEach(({ status }) => {
+    if (status.kind === 'worked') {
+      workingDays++;
+      totalHours += status.hours;
+      permissionHours += status.permissionHours || 0;
+      if (status.hours > MYATT_OVERTIME_THRESHOLD_HOURS) overtimeHours += (status.hours - MYATT_OVERTIME_THRESHOLD_HOURS);
+      if (status.hasLeave) leaveDays++;
+    } else if (status.kind === 'leave') {
+      leaveDays++;
+    }
+  });
+
+  const STATUS_LABEL = { leave: 'Leave', holiday: 'Holiday', weekend: 'Weekend', not_logged: 'No Entry', upcoming: '—' };
+  const rangeLabel = MYATT_RANGE_MODE === 'month'
+    ? new Date(MYATT_MONTH + '-01T00:00:00').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })
+    : 'Last 15 Days';
+
+  const rowsHtml = statuses.slice().reverse().map(({ date, status }) => {
+    const dateLabel = new Date(date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+    if (status.kind === 'worked') {
+      const timeLine = (status.checkIn && status.checkOut) ? `${fmtMyProj12(status.checkIn)} → ${fmtMyProj12(status.checkOut)}` : '—';
+      const ot = status.hours > MYATT_OVERTIME_THRESHOLD_HOURS ? ` (OT +${fmtMyProjHours(status.hours - MYATT_OVERTIME_THRESHOLD_HOURS)})` : '';
+      const leaveTag = status.hasLeave ? ' 🏖' : '';
+      return `<tr><td>${esc(dateLabel)}</td><td>${esc(timeLine)}${leaveTag}</td><td>${esc(fmtMyProjHours(status.hours))}${esc(ot)}</td></tr>`;
+    }
+    return `<tr><td>${esc(dateLabel)}</td><td>${esc(STATUS_LABEL[status.kind] || 'No Entry')}</td><td>—</td></tr>`;
+  }).join('');
+
+  const printWindow = window.open('', '_blank');
+  if (!printWindow) { toast?.('e', 'Could not open print preview', 'Your browser may have blocked the pop-up.'); return; }
+
+  const empName = (typeof USER !== 'undefined' && USER && USER.name) || '';
+  const empId   = (typeof USER !== 'undefined' && USER && USER.id)   || '';
+
+  printWindow.document.write(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>My Attendance — ${esc(rangeLabel)}</title>
+      <style>
+        * { box-sizing: border-box; }
+        body { font-family: Arial, Helvetica, sans-serif; color: #111; margin: 0; padding: 20px; }
+        h1 { font-size: 16px; margin: 0 0 2px; }
+        .sub { font-size: 11px; color: #555; margin-bottom: 14px; }
+        .summary { display: flex; gap: 24px; margin-bottom: 16px; }
+        .summary div span { display: block; }
+        .summary .label { font-size: 9px; color: #777; text-transform: uppercase; letter-spacing: .4px; }
+        .summary .value { font-size: 14px; font-weight: 700; margin-top: 2px; }
+        table { border-collapse: collapse; width: 100%; font-size: 11px; }
+        th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }
+        th { background: #f0f0f0; text-transform: uppercase; font-size: 9px; color: #333; }
+      </style>
+    </head>
+    <body>
+      <h1>Attendance Report</h1>
+      <div class="sub">${esc(empName)}${empId ? ' (' + esc(empId) + ')' : ''} · ${esc(rangeLabel)} · Generated ${new Date().toLocaleString('en-IN')}</div>
+      <div class="summary">
+        <div><span class="label">Leave Days</span><span class="value">${leaveDays}</span></div>
+        <div><span class="label">Permission Hrs</span><span class="value">${permissionHours > 0 ? esc(fmtMyProjHours(permissionHours)) : '—'}</span></div>
+        <div><span class="label">Working Days</span><span class="value">${workingDays}</span></div>
+        <div><span class="label">Total Hours</span><span class="value">${esc(fmtMyProjHours(totalHours))}</span></div>
+        <div><span class="label">OT Hours</span><span class="value">${overtimeHours > 0 ? esc(fmtMyProjHours(overtimeHours)) : '—'}</span></div>
+      </div>
+      <table>
+        <thead><tr><th>Date</th><th>Check In → Out</th><th>Hours</th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </body>
+    </html>
+  `);
+  printWindow.document.close();
+  printWindow.focus();
+  printWindow.onload = () => printWindow.print();
+  setTimeout(() => { if (!printWindow.closed) printWindow.print(); }, 400); // fallback in case onload doesn't fire in time
 }
 
 function fmtMyProjDate(dateStr) {
