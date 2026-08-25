@@ -22,7 +22,7 @@ let ENTRIES      = [];   // full history for table.js / chart.js
 let DAY_ENTRIES  = {};   // { morning:[], afternoon:[] } — current date only
 let CURRENT_DATE = '';   // YYYY-MM-DD
 
-const MAX_ENTRIES_PER_SLOT = 4;
+const MAX_ENTRIES_PER_SLOT = 5;
 
 const SLOT_META = {
   // minTime/displayMin extended down to 00:00 so an early start can be
@@ -52,16 +52,16 @@ function initForm() {
 // ── DATE NAVIGATION ───────────────────────────────
 // Maximum days back from today that can be logged/edited.
 // 0 = today, 1 = yesterday, 2 = day before yesterday.
-// Was a fixed constant — now per-employee: defaults to 2, but HR can
+// Was a fixed constant — now per-employee: defaults to 3, but HR can
 // grant an individual employee a longer window (e.g. 10 days) from
 // the Manage Employees tab, to let them catch up on a backlog of
 // missed entries without opening it up for everyone. Read from
 // USER.extendedDaysBack (set at login from the Employees sheet) —
-// falls back to the same default of 2 if unset/not a valid number.
+// falls back to the same default of 3 if unset/not a valid number.
 function getMaxDaysBack() {
   const raw = typeof USER !== 'undefined' && USER ? USER.extendedDaysBack : null;
   const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : 2;
+  return Number.isFinite(n) && n > 0 ? n : 3;
 }
 
 function renderDateNav() {
