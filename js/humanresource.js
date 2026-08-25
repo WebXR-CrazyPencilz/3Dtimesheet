@@ -716,7 +716,7 @@ function renderHRManageEmployeesTab(content) {
           </div>
           <div style="flex:0 0 100px;">
             <label style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.3px;display:block;margin-bottom:3px;" title="How many past days this employee can log/edit entries for. Default is 2 for everyone — raise it for someone who needs to catch up on a backlog.">Entry Window</label>
-            <input type="number" min="1" max="60" class="hr-manage-daysback" value="${emp.extendedDaysBack ? emp.extendedDaysBack : ''}" placeholder="2 (default)" style="width:100%;box-sizing:border-box;
+            <input type="number" min="1" max="60" class="hr-manage-daysback" value="${emp.extendedDaysBack ? emp.extendedDaysBack : ''}" placeholder="4 (default)" style="width:100%;box-sizing:border-box;
               background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--txt1);font-size:12px;padding:6px 8px;"/>
           </div>
           <div style="flex:0 0 120px;">
