@@ -351,8 +351,8 @@ function renderAttendanceGrid() {
 
   wrap.innerHTML = `
     ${truncNote}
-    <div style="background:var(--surface1);border:1px solid var(--border);border-radius:12px;
-      max-height:70vh;overflow-x:auto;overflow-y:auto;">
+    <div id="attendScrollBox" tabindex="0" class="attend-scrollbox" style="background:var(--surface1);border:1px solid var(--border);border-radius:12px;
+      max-height:70vh;overflow-x:auto;overflow-y:auto;outline:none;" title="Click here, then use arrow keys to scroll — or Shift + mouse wheel to scroll sideways.">
       <table style="width:100%;border-collapse:separate;border-spacing:0;font-size:11.5px;">
         <thead>
           <tr>
@@ -518,6 +518,39 @@ function renderAttendanceGrid() {
       if (typeof openEmpDetail === 'function') openEmpDetail(cell.dataset.empId, cell.dataset.empName);
     });
   });
+
+  // Keyboard + mouse-wheel scrolling for the grid — same box, same
+  // behavior, regardless of which portal (Manager/Team Leader/HR)
+  // rendered it, since they all call this one function. A click
+  // focuses the box (tabindex="0" above) so arrow keys then scroll
+  // it instead of the page; Shift+wheel scrolls sideways even in
+  // browsers where that isn't already the native default.
+  const scrollBox = $('attendScrollBox');
+  if (scrollBox && !scrollBox.dataset.scrollWired) {
+    scrollBox.dataset.scrollWired = '1';
+    const STEP_X = 120, STEP_Y = 60;
+    scrollBox.addEventListener('keydown', e => {
+      switch (e.key) {
+        case 'ArrowLeft':  scrollBox.scrollLeft -= STEP_X; e.preventDefault(); break;
+        case 'ArrowRight': scrollBox.scrollLeft += STEP_X; e.preventDefault(); break;
+        case 'ArrowUp':    scrollBox.scrollTop  -= STEP_Y; e.preventDefault(); break;
+        case 'ArrowDown':  scrollBox.scrollTop  += STEP_Y; e.preventDefault(); break;
+        case 'PageUp':     scrollBox.scrollTop  -= scrollBox.clientHeight; e.preventDefault(); break;
+        case 'PageDown':   scrollBox.scrollTop  += scrollBox.clientHeight; e.preventDefault(); break;
+        case 'Home':       scrollBox.scrollLeft = 0; e.preventDefault(); break;
+        case 'End':        scrollBox.scrollLeft = scrollBox.scrollWidth; e.preventDefault(); break;
+      }
+    });
+    scrollBox.addEventListener('wheel', e => {
+      if (e.shiftKey) {
+        scrollBox.scrollLeft += e.deltaY;
+        e.preventDefault();
+      }
+      // Without Shift, plain vertical wheel scrolling is left to the
+      // browser's own native behavior (overflow-y:auto already
+      // handles it) — only the horizontal case needs help here.
+    }, { passive: false });
+  }
 }
 
 // ── FORCE ENTRY / FORCE LEAVE FROM THE ATTENDANCE GRID ────────────

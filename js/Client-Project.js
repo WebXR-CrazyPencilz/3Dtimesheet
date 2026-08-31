@@ -101,11 +101,6 @@ let CP_DETAIL_REFRESH_TIMER = null;
 
 const CP_STATUSES = ['In Progress', 'Completed', 'On Hold'];
 
-// Manager Notes / Team Leader Notes are capped at this length (both
-// via the textarea's maxlength attribute and the live counter next
-// to it) — short, at-a-glance remarks, not a full activity log.
-const CP_NOTES_MAX_LENGTH = 200;
-
 const CP_STATUS_META = {
   'In Progress': { bg: 'rgba(79,142,247,0.12)',  fg: '#4f8ef7' },
   'Completed':   { bg: 'rgba(52,211,153,0.12)',  fg: '#34d399' },
@@ -400,6 +395,14 @@ function ensureCPStyles() {
       align-self:flex-start;margin-top:auto;background:var(--a1);color:#fff;border:none;
       border-radius:7px;padding:7px 16px;font-size:12px;font-weight:600;cursor:pointer;
     }
+    .attend-scrollbox:focus {
+      box-shadow: 0 0 0 2px var(--a1, #4f8ef7);
+    }
+    .attend-scrollbox::-webkit-scrollbar { height: 10px; width: 10px; }
+    .attend-scrollbox::-webkit-scrollbar-thumb {
+      background: var(--border-md, #c7c7c7); border-radius: 6px;
+    }
+    .attend-scrollbox::-webkit-scrollbar-track { background: transparent; }
   `;
   document.head.appendChild(style);
 }
@@ -500,16 +503,44 @@ async function renderClientTab(content) {
   }
   content.innerHTML = `<div class="mgr-loading"><div class="slot-spinner"></div><span>Loading clients…</span></div>`;
   try {
-    // Client cards need both clients (for the grid itself) and
-    // projects (for the "project count" / "active" badge on each
-    // card, and for the scoped grid on the Client Detail page).
-    await Promise.all([loadClientData(), loadProjectData(), loadHistoricalData()]);
+    // Same bundled request as renderProjectTab (see its comment) —
+    // this tab doesn't need historicalProjectsSummary, but fetching
+    // it alongside costs nothing extra since it's already one Sheet
+    // read inside the same execution.
+    let bundle;
+    try {
+      bundle = await sheetGET({ action: 'getProjectTabData', role: CP_ROLE });
+    } catch (bundleErr) {
+      console.warn('[client-project] getProjectTabData unavailable, falling back to individual calls:', bundleErr.message);
+    }
+
+    if (bundle) {
+      CP_CLIENTS = (bundle.clients || []).map((c, idx) => ({ ...c, entryIndex: idx }));
+      window.MGR_CLIENTS = CP_CLIENTS;
+      CP_PROJECTS = (bundle.projects || []).map((p, idx) => ({ ...p, entryIndex: idx }));
+      CP_HISTORICAL_DATA = bundle.historicalRecords || [];
+    } else {
+      // Client cards need both clients (for the grid itself) and
+      // projects (for the "project count" / "active" badge on each
+      // card, and for the scoped grid on the Client Detail page).
+      await Promise.all([loadClientData(), loadProjectData(), loadHistoricalData()]);
+    }
   } catch(err) {
     content.innerHTML = `<div class="slot-error">Failed to load clients: ${esc(err.message)}</div>`;
     return;
   }
 
-  renderClientCards(content);
+  // Rendering itself is now guarded too — previously an exception
+  // thrown while building the cards (e.g. a bad record shape) left
+  // the loading spinner's markup silently replaced by nothing
+  // visible, with the only trace being a console error. Now any
+  // render-time failure surfaces the same way a load-time failure
+  // already did, instead of a page that just looks blank.
+  try {
+    renderClientCards(content);
+  } catch (err) {
+    content.innerHTML = `<div class="slot-error">Failed to display clients: ${esc(err.message)}</div>`;
+  }
 }
 
 async function renderProjectTab(content) {
@@ -521,12 +552,76 @@ async function renderProjectTab(content) {
   }
   content.innerHTML = `<div class="mgr-loading"><div class="slot-spinner"></div><span>Loading projects…</span></div>`;
   try {
-    await Promise.all([loadClientData(), loadProjectData(), loadHistoricalData(), loadHistoricalProjectsSummary()]);
+    // Single bundled request (getProjectTabData) instead of four
+    // separate ones (getClientMasterList, getProjectMasterList,
+    // getHistoricalRecords, getHistoricalProjectsSummary) — same
+    // data, one Apps Script round-trip instead of four. Falls back to
+    // the old four-call path if the bundle endpoint isn't available
+    // (e.g. Code.gs hasn't been redeployed yet), so this can't break
+    // an already-working setup.
+    let bundle;
+    try {
+      bundle = await sheetGET({ action: 'getProjectTabData', role: CP_ROLE });
+    } catch (bundleErr) {
+      console.warn('[client-project] getProjectTabData unavailable, falling back to individual calls:', bundleErr.message);
+    }
+
+    if (bundle) {
+      CP_CLIENTS = (bundle.clients || []).map((c, idx) => ({ ...c, entryIndex: idx }));
+      window.MGR_CLIENTS = CP_CLIENTS;
+      CP_PROJECTS = (bundle.projects || []).map((p, idx) => ({ ...p, entryIndex: idx }));
+      CP_HISTORICAL_DATA = bundle.historicalRecords || [];
+      CP_HIST_PROJECTS_SUMMARY = bundle.historicalProjectsSummary || [];
+    } else {
+      await Promise.all([loadClientData(), loadProjectData(), loadHistoricalData(), loadHistoricalProjectsSummary()]);
+    }
   } catch(err) {
     content.innerHTML = `<div class="slot-error">Failed to load projects: ${esc(err.message)}</div>`;
     return;
   }
-  renderProjectList(content);
+  try {
+    renderProjectList(content);
+  } catch (err) {
+    content.innerHTML = `<div class="slot-error">Failed to display projects: ${esc(err.message)}</div>`;
+  }
+}
+
+// Refreshes ONLY this tab's data (Clients/Projects/Historical) and
+// re-renders in place — used by the 🔄 button in the tab header.
+// Deliberately does NOT touch MGR_DATA/CP_TIMESHEET_DATA (that's
+// manager.js's/teamleader.js's own concern, refreshed by their own
+// portal-level reload) and does NOT reset CP_PC_CLIENT/CP_PC_PROJECT_ID,
+// so a refresh while a client/project is selected keeps that
+// selection instead of bouncing back to the top-level grid.
+async function refreshProjectTab(content) {
+  const btn = $('cpRefreshBtn');
+  if (btn) { btn.disabled = true; btn.style.opacity = '.5'; }
+  try {
+    let bundle;
+    try {
+      bundle = await sheetGET({ action: 'getProjectTabData', role: CP_ROLE });
+    } catch (bundleErr) {
+      console.warn('[client-project] getProjectTabData unavailable, falling back to individual calls:', bundleErr.message);
+    }
+
+    if (bundle) {
+      CP_CLIENTS = (bundle.clients || []).map((c, idx) => ({ ...c, entryIndex: idx }));
+      window.MGR_CLIENTS = CP_CLIENTS;
+      CP_PROJECTS = (bundle.projects || []).map((p, idx) => ({ ...p, entryIndex: idx }));
+      CP_HISTORICAL_DATA = bundle.historicalRecords || [];
+      CP_HIST_PROJECTS_SUMMARY = bundle.historicalProjectsSummary || [];
+    } else {
+      await Promise.all([loadClientData(), loadProjectData(), loadHistoricalData(), loadHistoricalProjectsSummary()]);
+    }
+    toast?.('s', 'Refreshed', 'Projects & Clients data is up to date.');
+  } catch (err) {
+    toast?.('e', 'Refresh failed', err.message);
+  }
+  try {
+    renderProjectList(content);
+  } catch (err) {
+    content.innerHTML = `<div class="slot-error">Failed to display projects: ${esc(err.message)}</div>`;
+  }
 }
 
 async function loadClientData() {
@@ -570,29 +665,13 @@ async function renderClientCards(content) {
 
     ${sorted.length === 0
       ? `<div class="chart-empty">No clients yet.${isManager ? ' Click “+ New Client” to add one.' : ''}</div>`
-      : `<div class="cp-card-grid" id="cpClientGrid">${sorted.map(c => buildClientCard(c, isManager, null)).join('')}</div>`}
+      : `<div class="cp-card-grid" id="cpClientGrid">${sorted.map(c => buildClientCard(c, isManager)).join('')}</div>`}
   `;
 
   $('cpNewClientBtn')?.addEventListener('click', () =>
     openClientEditor(content, null, () => renderClientCards(content)));
 
   wireClientCardEvents(content);
-
-  // Performance candles need each project's cost (Constant vs. actual
-  // employee cost), which needs salary data — same two-phase pattern
-  // used on the Project tab: render immediately with hours-only
-  // candles, then fill in Constant/Value/Profit once salary data has
-  // loaded, without blocking the initial view on that fetch.
-  if (isManager && sorted.length) {
-    await ensureSalaryDataLoaded();
-    const grid = $('cpClientGrid');
-    if (!grid || !document.body.contains(grid)) return; // navigated away while this was loading
-    const costMaps = {};
-    await Promise.all(sorted.map(async c => { costMaps[c.id] = await buildClientCostMap(c); }));
-    if (!document.body.contains(grid)) return; // navigated away while awaiting cost data
-    grid.innerHTML = sorted.map(c => buildClientCard(c, isManager, costMaps[c.id])).join('');
-    wireClientCardEvents(content);
-  }
 }
 
 function wireClientCardEvents(content) {
@@ -625,14 +704,7 @@ function wireClientCardEvents(content) {
 // Cost for every one of this client's projects, keyed by Project ID —
 // computed once per client rather than inline per-candle, so
 // buildClientCandleChart just does a lookup.
-async function buildClientCostMap(client) {
-  const map = {};
-  const projects = CP_PROJECTS.filter(p => p.clientId === client.id);
-  await Promise.all(projects.map(async p => { map[p.projectId] = await calculateProjectCost(p); }));
-  return map;
-}
-
-function buildClientCard(client, isManager, costMap) {
+function buildClientCard(client, isManager) {
   const initials = client.name.split(' ').map(w => w[0]).filter(Boolean).join('').toUpperCase().slice(0, 2) || '?';
   const isActive = clientHasActiveProject(client.id);
   const clientProjects = CP_PROJECTS.filter(p => p.clientId === client.id);
@@ -672,7 +744,7 @@ function buildClientCard(client, isManager, costMap) {
 
       <div style="margin:1rem 0;">
         <div style="font-size:10px;color:var(--txt2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">Project Performance</div>
-        ${buildClientCandleChart(client, clientProjects, isManager, costMap)}
+        ${buildClientCandleChart(client, clientProjects)}
       </div>
 
       <button class="cp-view-btn cp-client-view-btn" data-id="${esc(client.id)}">View Projects →</button>
@@ -687,7 +759,7 @@ function buildClientCard(client, isManager, costMap) {
 // Constant, Value, and Profit/Loss (Manager only — Team Leaders still
 // see the hours candle itself, just not the money figures, same
 // boundary enforced everywhere else Project Constant/Value appears).
-function buildClientCandleChart(client, projects, isManager, costMap) {
+function buildClientCandleChart(client, projects) {
   if (!projects.length) {
     return `<div style="font-size:11px;color:var(--txt2);">No projects yet for this client.</div>`;
   }
@@ -695,17 +767,18 @@ function buildClientCandleChart(client, projects, isManager, costMap) {
   const perProject = projects.map(p => {
     const totals = getProjectEmployeeTotals(p);
     const totalHours = totals.reduce((s, t) => s + t.hours, 0);
-    const constant = parseFloat(p.projectConstant) || 0;
-    return { project: p, totals, totalHours, constant };
+    return { project: p, totals, totalHours };
   });
 
-  const maxHours    = Math.max(...perProject.map(x => x.totalHours), 0.01);
-  const maxConstant = Math.max(...perProject.map(x => x.constant), 0.01);
+  const maxHours = Math.max(...perProject.map(x => x.totalHours), 0.01);
+  const isManager = CP_ROLE === 'manager';
+  const maxConstant = isManager
+    ? Math.max(...perProject.map(x => parseFloat(x.project.projectConstant) || 0), 0.01)
+    : 0;
 
-  const rows = perProject.map(({ project: p, totals, totalHours, constant }, i) => {
-    const cost   = isManager ? (costMap ? costMap[p.projectId] : null) : null;
+  const rows = perProject.map(({ project: p, totals, totalHours }, i) => {
     const isLast = i === perProject.length - 1;
-    return buildProjectPerfRow(p, totals, totalHours, maxHours, constant, maxConstant, isManager, cost, isLast);
+    return buildProjectPerfRow(p, totals, totalHours, maxHours, isLast, isManager, maxConstant);
   }).join('');
 
   return `<div>${rows}</div>`;
@@ -717,7 +790,7 @@ function buildClientCandleChart(client, projects, isManager, costMap) {
 // this client's highest Constant) — Manager only sees the Constant
 // bar and the Value/Profit line beneath it, same permission boundary
 // as before.
-function buildProjectPerfRow(project, totals, totalHours, maxHours, constant, maxConstant, showMoney, cost, isLast) {
+function buildProjectPerfRow(project, totals, totalHours, maxHours, isLast, isManager, maxConstant) {
   const hasHours = totalHours > 0;
   const timeFillPct = hasHours ? Math.max((totalHours / maxHours) * 100, 3) : 100;
   const timeSegments = hasHours
@@ -728,31 +801,18 @@ function buildProjectPerfRow(project, totals, totalHours, maxHours, constant, ma
       }).join('')
     : `<div style="width:100%;height:100%;background:var(--border-md);" title="No hours logged yet"></div>`;
 
-  let moneyHtml = '';
-  if (showMoney) {
-    const hasConstant  = constant > 0;
-    const constFillPct = hasConstant ? Math.max((constant / maxConstant) * 100, 3) : 100;
-    const value = parseFloat(project.projectValue) || 0;
-
-    const perfHtml = cost
-      ? (() => {
-          const isProfit = cost.profit >= 0;
-          return `<span style="font-weight:700;color:${isProfit ? '#34d399' : '#f87171'};">${isProfit ? '+' : '-'}${fmtCPRupees(Math.abs(cost.profit))}</span>`;
-        })()
-      : `<span style="color:var(--txt2);">Calculating…</span>`;
-
-    moneyHtml = `
-      <div style="display:flex;align-items:center;gap:10px;margin-top:6px;">
+  // Constant bar — Manager only, same boundary as everywhere else
+  // Project Constant appears. Length relative to this client's own
+  // highest Constant, same pattern as the Time bar above it.
+  const constantVal = parseFloat(project.projectConstant) || 0;
+  const constantRow = isManager ? `
+      <div style="display:flex;align-items:center;gap:10px;margin-top:4px;">
         <span style="flex:0 0 62px;font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.3px;">Constant</span>
-        <div style="flex:1;height:10px;background:var(--surface2);border:1px solid var(--border);border-radius:5px;overflow:hidden;">
-          <div style="width:${constFillPct}%;height:100%;background:${hasConstant ? '#f59e0b' : 'var(--border-md)'};"></div>
+        <div style="flex:1;height:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+          <div style="width:${Math.max((constantVal / maxConstant) * 100, constantVal > 0 ? 3 : 0)}%;height:100%;background:var(--a1);"></div>
         </div>
-        <span style="flex:0 0 74px;text-align:right;font-size:10px;color:var(--txt1);font-weight:700;white-space:nowrap;">${fmtCPRupees(constant)}</span>
-      </div>
-      <div style="font-size:9.5px;color:var(--txt2);margin-top:4px;padding-left:72px;">
-        Value: ${fmtCPRupees(value)} · ${perfHtml}
-      </div>`;
-  }
+        <span style="flex:0 0 74px;text-align:right;font-size:10px;color:var(--txt1);font-weight:700;white-space:nowrap;">${esc(fmtCPConstant(constantVal))}</span>
+      </div>` : '';
 
   return `
     <div style="${isLast ? '' : 'margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--border);'}">
@@ -765,8 +825,7 @@ function buildProjectPerfRow(project, totals, totalHours, maxHours, constant, ma
           <div style="width:${timeFillPct}%;height:100%;display:flex;">${timeSegments}</div>
         </div>
         <span style="flex:0 0 74px;text-align:right;font-size:10px;color:var(--txt1);font-weight:700;white-space:nowrap;">${fmtHM(totalHours)}</span>
-      </div>
-      ${moneyHtml}
+      </div>${constantRow}
     </div>`;
 }
 
@@ -871,40 +930,25 @@ function openClientEditor(content, client = null, onDone = null) {
 // class/data-id convention.
 async function renderClientProjectPerformanceInto(content, gridEl, projects, onBack) {
   if (!gridEl) return;
-  const isManager = CP_ROLE === 'manager';
-
-  gridEl.innerHTML = buildClientProjectPerfGrid(projects, isManager, null);
+  gridEl.innerHTML = buildClientProjectPerfGrid(projects);
   wireProjectCards(content, gridEl, projects, onBack);
-
-  if (isManager) {
-    await ensureSalaryDataLoaded();
-    if (!document.body.contains(gridEl)) return; // user navigated away while this was loading
-    const costMap = {};
-    await Promise.all(projects.map(async p => { costMap[p.projectId] = await calculateProjectCost(p); }));
-    if (!document.body.contains(gridEl)) return; // navigated away while awaiting cost data
-    gridEl.innerHTML = buildClientProjectPerfGrid(projects, isManager, costMap);
-    wireProjectCards(content, gridEl, projects, onBack);
-  }
 }
 
-function buildClientProjectPerfGrid(projects, isManager, costMap) {
+function buildClientProjectPerfGrid(projects) {
   if (!projects.length) return `<div class="chart-empty">No projects yet for this client.</div>`;
 
   const perProject = projects.map(p => {
     const totals = getProjectEmployeeTotals(p);
     const totalHours = totals.reduce((s, t) => s + t.hours, 0);
-    const constant = parseFloat(p.projectConstant) || 0;
-    return { project: p, totals, totalHours, constant };
+    return { project: p, totals, totalHours };
   });
 
-  const maxHours    = Math.max(...perProject.map(x => x.totalHours), 0.01);
-  const maxConstant = Math.max(...perProject.map(x => x.constant), 0.01);
+  const maxHours = Math.max(...perProject.map(x => x.totalHours), 0.01);
 
-  const cards = perProject.map(({ project: p, totals, totalHours, constant }) => {
-    const cost = isManager ? (costMap ? costMap[p.projectId] : null) : null;
+  const cards = perProject.map(({ project: p, totals, totalHours }) => {
     return `
       <div class="cp-card">
-        ${buildProjectPerfRow(p, totals, totalHours, maxHours, constant, maxConstant, isManager, cost, true)}
+        ${buildProjectPerfRow(p, totals, totalHours, maxHours, true)}
         <button class="cp-project-view-btn" data-id="${esc(p.projectId)}" style="margin-top:1rem;width:100%;
           background:var(--a1);color:#fff;border:none;border-radius:8px;padding:8px 14px;
           font-size:12px;font-weight:700;cursor:pointer;">View Details →</button>
@@ -979,6 +1023,9 @@ function renderProjectList(content) {
         <div class="cp-tab-sub">Projects received from clients — status and view progress. Not a task board.</div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <button id="cpRefreshBtn" title="Refresh this tab's data" style="background:var(--elevated);
+          border:1px solid var(--border-md);border-radius:6px;color:var(--txt2);cursor:pointer;
+          padding:7px 10px;font-size:13px;line-height:1;display:flex;align-items:center;">🔄</button>
         <input id="cpProjectSearch" type="text" placeholder="🔍 Search projects…" style="background:var(--surface2);
           border:1px solid var(--border);border-radius:6px;color:var(--txt1);font-size:12.5px;padding:7px 10px;width:180px;"/>
         <select id="cpProjectSort" style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;
@@ -1010,6 +1057,7 @@ function renderProjectList(content) {
     openClientEditor(content, null, () => renderProjectList(content)));
   $('cpNewProjectBtn')?.addEventListener('click', () =>
     openProjectDetail(content, null, { presetClientId: CP_PC_CLIENT, onBack: () => renderProjectList(content) }));
+  $('cpRefreshBtn')?.addEventListener('click', () => refreshProjectTab(content));
   $('cpProjectSort')?.addEventListener('change', e => {
     CP_PROJECT_SORT = e.target.value;
     renderProjectList(content);
@@ -1050,30 +1098,9 @@ function renderProjectList(content) {
         });
       });
     };
-    gridEl.innerHTML = sortedProjects.map(p => buildProjectCard(p, isManager)).join('')
+    gridEl.innerHTML = sortedProjects.map(p => buildProjectCard(p)).join('')
       + filteredHistorical.map(buildHistoricalOnlyCard).join('');
     wireGridClicks();
-
-    // Second phase — Manager only: Team Leader never sees Cost/Profit/
-    // Constant (the backend withholds projectConstant for role='tl'
-    // entirely, so computing Profit/Loss for TL would always show a
-    // false Loss — 0 budget minus any cost). Once Cost/Profit is
-    // available for Manager, re-render with the bar recolored
-    // green/red instead of per-employee segments. Same two-phase
-    // pattern buildClientCostMap already uses elsewhere — render fast
-    // with what's immediately known, fill in Cost/Profit once salary
-    // data has loaded, without blocking the initial view.
-    if ((isManager || CP_ROLE === 'tl') && sortedProjects.length) {
-      (async () => {
-        await ensureSalaryDataLoaded();
-        if (!document.body.contains(gridEl)) return; // navigated away while this was loading
-        const costs = await Promise.all(sortedProjects.map(p => calculateProjectCost(p)));
-        if (!document.body.contains(gridEl)) return; // navigated away while awaiting cost data
-        gridEl.innerHTML = sortedProjects.map((p, i) => buildProjectCard(p, isManager, costs[i])).join('')
-          + filteredHistorical.map(buildHistoricalOnlyCard).join('');
-        wireGridClicks();
-      })();
-    }
     return;
   }
 
@@ -1168,9 +1195,7 @@ function renderCompactProjectListInto(wrap, projects, content) {
 // salary-dependent second pass needed) — renders once, synchronously.
 async function renderProjectCardsInto(content, gridEl, projects, onBack) {
   if (!gridEl) return;
-  const isManager = CP_ROLE === 'manager';
-
-  gridEl.innerHTML = projects.map(p => buildProjectCard(p, isManager)).join('');
+  gridEl.innerHTML = projects.map(p => buildProjectCard(p)).join('');
   wireProjectCards(content, gridEl, projects, onBack);
 }
 
@@ -1183,7 +1208,7 @@ function wireProjectCards(content, gridEl, projects, onBack) {
   });
 }
 
-function buildProjectCard(p, isManager, cost) {
+function buildProjectCard(p) {
   const client = CP_CLIENTS.find(c => c.id === p.clientId);
   const initials = (p.projectName || p.projectId || '?').trim().slice(0, 2).toUpperCase();
   const color  = getProjectColor(p.projectId);
@@ -1191,76 +1216,26 @@ function buildProjectCard(p, isManager, cost) {
   const totals = getProjectEmployeeTotals(p); // already includes historical hours, see getProjectEmployeeTotals
   const totalHours = totals.reduce((s, t) => s + t.hours, 0);
 
-  // End Date box shows the actual date once set; until then it shows
-  // the project's current status instead, so the slot is never just
-  // empty.
-  const endOrStatusLabel = p.endDate ? 'End Date' : 'Status';
-  const endOrStatusValue = p.endDate ? fmtCPDateShort(p.endDate) : p.status;
+  const endOrStatusLabel = 'Status';
+  const endOrStatusValue = p.status;
 
-  // Manager view, once cost has loaded (see the two-phase render in
-  // renderProjectList — same pattern buildClientCostMap already uses
-  // elsewhere): the bar's full width represents the Project Constant
-  // (the budget) — it fills green as Employee Cost accumulates toward
-  // it. Once Employee Cost exceeds the Constant, the bar is fully red
-  // (Loss) instead of continuing to grow past 100%. Team Leader never
-  // sees Cost/Profit/Constant (same boundary as everywhere else in
-  // this file), so they always keep the per-employee bar — permanently,
-  // not just during a loading phase.
-  const showProfitColor = (isManager || CP_ROLE === 'tl') && cost && typeof cost.profit === 'number';
-  const hasBudget = showProfitColor && cost.projectBudget > 0;
-  const isOverflow = hasBudget && cost.totalCost > cost.projectBudget;
-  // Manager's phase-1 render (cost not loaded yet) — a neutral
-  // skeleton bar, not the per-employee colors, since those would only
-  // flash for the ~1s before the real Profit/Loss bar replaces them
-  // (the visible "flicker" this avoids). Team Leader has no such
-  // phase — their per-employee bar IS the permanent view, so it's
-  // never treated as a loading state.
-  const isManagerLoadingCost = (isManager || CP_ROLE === 'tl') && !cost;
-
-  let consumedBarHtml, barLabelHtml;
-  if (hasBudget) {
-    const fillPct = isOverflow ? 100 : Math.min((cost.totalCost / cost.projectBudget) * 100, 100);
-    consumedBarHtml = `<div style="width:${fillPct}%;height:100%;background:${isOverflow ? '#f87171' : '#34d399'};"></div>`;
-    barLabelHtml = isManager
-      ? `<div style="font-size:9px;font-weight:700;color:${isOverflow ? '#f87171' : '#34d399'};margin-bottom:3px;">
-          ${isOverflow ? 'Loss' : 'Profit'} ${esc(fmtCPConstant(Math.abs(cost.profit)))}
-          <span style="color:var(--txt2);font-weight:600;">— ${esc(fmtCPConstant(cost.totalCost))} of ${esc(fmtCPConstant(cost.projectBudget))} Constant</span>
-        </div>`
-      : `<div style="font-size:9px;font-weight:700;color:${isOverflow ? '#f87171' : '#34d399'};margin-bottom:3px;">${esc(fmtHM(totalHours))} consumed</div>`;
-  } else if (showProfitColor) {
-    // No Project Constant set for this project — nothing to fill
-    // against, so fall back to a flat Profit/Loss color instead of a
-    // fill percentage that would be meaningless without a budget.
-    const isProfit = cost.profit >= 0;
-    consumedBarHtml = `<div style="width:100%;height:100%;background:${isProfit ? '#34d399' : '#f87171'};"
-        title="${isManager ? (isProfit ? 'Profit' : 'Loss') + ': ' + fmtCPConstant(Math.abs(cost.profit)) : fmtHM(totalHours) + ' consumed'}"></div>`;
-    barLabelHtml = isManager
-      ? `<div style="font-size:9px;font-weight:700;color:${isProfit ? '#34d399' : '#f87171'};margin-bottom:3px;">
-          ${isProfit ? 'Profit' : 'Loss'} ${esc(fmtCPConstant(Math.abs(cost.profit)))}
-          <span style="color:var(--txt2);font-weight:600;">— no Project Constant set</span>
-        </div>`
-      : `<div style="font-size:9px;font-weight:700;color:${isProfit ? '#34d399' : '#f87171'};margin-bottom:3px;">${esc(fmtHM(totalHours))} consumed</div>`;
-  } else if (isManagerLoadingCost) {
-    consumedBarHtml = `<div style="width:100%;height:100%;background:var(--border-md);
-        background-image:linear-gradient(90deg, transparent, rgba(255,255,255,.12), transparent);
-        background-size:60px 100%;animation:cpBarShimmer 1.2s linear infinite;"></div>`;
-    barLabelHtml = `<div style="font-size:9px;font-weight:600;color:var(--txt2);margin-bottom:3px;">Loading cost…</div>`;
-  } else {
-    consumedBarHtml = totalHours > 0
-      ? totals.map((t, i) => {
-          const pct = (t.hours / totalHours) * 100;
-          return `<div style="width:${pct}%;height:100%;background:${i % 2 === 0 ? '#34d399' : '#f87171'};"
-            title="${esc(t.name)}: ${fmtHM(t.hours)}"></div>`;
-        }).join('')
-      : `<div style="width:100%;height:100%;background:var(--border-md);"></div>`;
-    barLabelHtml = `<div style="font-size:9px;font-weight:700;color:var(--txt1);margin-bottom:3px;">
-        ${totalHours > 0 ? `${esc(fmtHM(totalHours))} consumed` : 'No hours logged yet'}
-      </div>`;
-  }
+  // Segmented hours bar, one color per employee — same for every
+  // role, since Cost/Profit no longer exists as a data source
+  // (Clients-Projects has no Project Constant/Value columns).
+  const consumedBarHtml = totalHours > 0
+    ? totals.map((t, i) => {
+        const pct = (t.hours / totalHours) * 100;
+        return `<div style="width:${pct}%;height:100%;background:${getEmployeeColor(t.empId)};"
+          title="${esc(t.name)}: ${fmtHM(t.hours)}"></div>`;
+      }).join('')
+    : `<div style="width:100%;height:100%;background:var(--border-md);"></div>`;
+  const barLabelHtml = `<div style="font-size:9px;font-weight:700;color:var(--txt1);margin-bottom:3px;">
+      ${totalHours > 0 ? `${esc(fmtHM(totalHours))} consumed` : 'No hours logged yet'}
+    </div>`;
 
   // Very simple by design — a scan-list entry, not a dashboard.
-  // Planned/Completed/Profit/Loss/Notes/Timeline all still live one
-  // click away on the Project Detail page.
+  // Timeline/Subtasks/Task Breakdown/Team Performance all still live
+  // one click away on the Project Detail page.
   return `
     <div class="cp-entity-card" data-search="${esc(((p.projectName || '') + ' ' + (p.projectId || '')).toLowerCase())}">
       <div style="display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:5px;margin-bottom:.18rem;">
@@ -1275,6 +1250,10 @@ function buildProjectCard(p, isManager, cost) {
           <div class="cp-metric-box" style="min-width:60px;padding:3px 6px;">
             <div class="cp-metric-label">Start Date</div>
             <div class="cp-metric-val" style="font-size:9px;">${esc(fmtCPDateShort(p.startDate))}</div>
+          </div>
+          <div class="cp-metric-box" style="min-width:60px;padding:3px 6px;">
+            <div class="cp-metric-label">Started By</div>
+            <div class="cp-metric-val" style="font-size:9px;">${esc(p.startedBy || '—')}</div>
           </div>
           <div class="cp-metric-box" style="min-width:60px;padding:3px 6px;">
             <div class="cp-metric-label">${esc(endOrStatusLabel)}</div>
@@ -1342,37 +1321,6 @@ function buildHistoricalOnlyCard(hp) {
     </div>`;
 }
 
-// Two separate notes fields, each owned by its own role (Manager
-// writes Manager Notes, Team Leader writes Team Leader Notes — see
-// Code.gs's saveProjectMaster). Both are shown to both roles here —
-// they aren't financial data like Project Constant/Value, so there's
-// no reason to hide either one — but each is only ever EDITED by its
-// owner, via the Project Detail form. A note that hasn't been written
-// yet shows an explicit "No notes yet" placeholder rather than being
-// left blank, so it's clear the field exists and simply hasn't been
-// filled in.
-function buildProjectNotesPreview(p) {
-  const mgrNote = (p.managerNotes || '').trim();
-  const tlNote  = (p.teamLeaderNotes || '').trim();
-
-  const box = (label, text) => `
-    <div class="cp-metric-box">
-      <div class="cp-metric-label">${label}</div>
-      <div style="font-size:11.5px;color:${text ? 'var(--txt1)' : 'var(--txt2)'};font-style:${text ? 'normal' : 'italic'};
-        overflow:hidden;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;margin-top:2px;"
-        title="${esc(text)}">${esc(text || 'No notes yet')}</div>
-    </div>`;
-
-  return `
-    <div style="margin-bottom:.9rem;">
-      <div style="font-size:10px;color:var(--txt2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Notes</div>
-      <div class="cp-entity-metrics" style="margin-bottom:0;">
-        ${box('Manager', mgrNote)}
-        ${box('Team Leader', tlNote)}
-      </div>
-    </div>`;
-}
-
 // ── DETAIL / EDIT — role-based permissions applied automatically:
 //   Manager: edit Name/ID/Client/Constant/Value/Planned/Status,
 //            view-only on Completed/Delivered.
@@ -1407,9 +1355,7 @@ async function openProjectDetail(content, projectId, opts = {}) {
 
   const isNew = !projectId;
   const project = isNew
-    ? { projectId: '', projectName: '', clientId: presetClientId, projectConstant: '', projectValue: 0,
-        plannedViews: 0, completedViews: 0, status: 'In Progress', managerNotes: '', teamLeaderNotes: '',
-        startDate: '', endDate: '' }
+    ? { projectId: '', projectName: '', clientId: presetClientId, status: 'In Progress', startDate: '', startedBy: '' }
     : CP_PROJECTS.find(p => p.projectId === projectId);
 
   if (!isNew && !project) { toast?.('e', 'Project not found', projectId); return; }
@@ -1417,21 +1363,11 @@ async function openProjectDetail(content, projectId, opts = {}) {
   const isManager = CP_ROLE === 'manager';
   const isTL      = CP_ROLE === 'tl';
 
-  // Manager can always edit the core project fields. Team Leader can
-  // ALSO edit them, but only while CREATING a new project — editing
-  // an EXISTING project's Name/ID/Client/Planned/Status stays
-  // Manager-only, same as before. Project Constant/Value are never
-  // part of this — Team Leader never sees or sets those, even when
-  // creating a project; they stay blank until a Manager fills them
-  // in via edit.
-  const canEditCore = isManager || (isNew && isTL);
-
-  // Start Date/End Date and Status are deliberate exceptions to
-  // canEditCore: Team Leader can edit these on an EXISTING project
-  // too, not just at creation — everything else (Name/ID/Client/
-  // Views Planned) stays governed by canEditCore.
-  const canEditDates  = isManager || isTL;
-  const canEditStatus = isManager || isTL;
+  // Manager and Team Leader can both edit every field on a project —
+  // the backend applies the same permission check (role must be
+  // 'manager' or 'tl') to both create and update, since Clients-
+  // Projects has no role-restricted financial fields anymore.
+  const canEdit = isManager || isTL;
 
   let suggestedId = '';
   if (isNew && isManager) {
@@ -1444,83 +1380,51 @@ async function openProjectDetail(content, projectId, opts = {}) {
         ${isNew ? '📁 New Project' : '📁 ' + esc(project.projectName || project.projectId)}
       </div>
       <div style="font-size:11.5px;color:var(--txt2);margin-bottom:1.1rem;">
-        ${isNew && isTL ? 'You can create the project. Project Constant/Value are set later by the Manager.'
-        : isManager ? 'You can edit project details, status, and view progress.'
-                    : 'You can update Views Completed, Start/End Date, and Status. Other project details are view-only here — Manager updates those.'}
+        ${canEdit ? 'You can edit project details and status.' : 'Project details are view-only for your role.'}
       </div>
 
       <div class="cp-form-grid">
         <div class="cp-form-field cp-span2">
           <label class="cp-flabel">Project Name</label>
-          <input class="cp-finput" id="cpName" value="${esc(project.projectName)}" ${canEditCore ? '' : 'disabled'} placeholder="e.g. SPR Tower F&amp;G Floorplan"/>
+          <input class="cp-finput" id="cpName" value="${esc(project.projectName)}" ${canEdit ? '' : 'disabled'} placeholder="e.g. SPR Tower F&amp;G Floorplan"/>
         </div>
 
         <div class="cp-form-field">
           <label class="cp-flabel">Project ID ${isNew && isManager ? '<span class="cp-hint">— suggested, editable</span>' : ''}</label>
-          <input class="cp-finput" id="cpId" value="${esc(isNew ? suggestedId : project.projectId)}" ${canEditCore ? '' : 'disabled'} placeholder="e.g. EUZ-042"/>
+          <input class="cp-finput" id="cpId" value="${esc(isNew ? suggestedId : project.projectId)}" ${canEdit ? '' : 'disabled'} placeholder="e.g. EUZ-042"/>
         </div>
 
         <div class="cp-form-field">
           <label class="cp-flabel">Client</label>
-          <select class="cp-finput" id="cpClient" ${canEditCore ? '' : 'disabled'}>
+          <select class="cp-finput" id="cpClient" ${canEdit ? '' : 'disabled'}>
             <option value="">— Select client —</option>
             ${CP_CLIENTS.map(c => `<option value="${esc(c.id)}" ${c.id === project.clientId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
           </select>
         </div>
 
-        ${isManager ? `
-        <div class="cp-form-field">
-          <label class="cp-flabel">Project Constant</label>
-          <input class="cp-finput" id="cpConstant" value="${esc(project.projectConstant)}" placeholder="e.g. 1.5"/>
-        </div>
-
-        <div class="cp-form-field">
-          <label class="cp-flabel">Project Value (₹)</label>
-          <input class="cp-finput" id="cpValue" type="number" min="0" value="${project.projectValue || ''}" placeholder="e.g. 8500"/>
-        </div>` : ''}
-
-        <div class="cp-form-field">
-          <label class="cp-flabel">Views Planned</label>
-          <input class="cp-finput" id="cpPlanned" type="number" min="0" value="${project.plannedViews || ''}" ${canEditCore ? '' : 'disabled'} placeholder="e.g. 20"/>
-        </div>
-
         <div class="cp-form-field">
           <label class="cp-flabel">Status</label>
-          <select class="cp-finput" id="cpStatus" ${canEditStatus ? '' : 'disabled'}>
+          <select class="cp-finput" id="cpStatus" ${canEdit ? '' : 'disabled'}>
             ${CP_STATUSES.map(s => `<option value="${s}" ${s === project.status ? 'selected' : ''}>${s}</option>`).join('')}
           </select>
         </div>
 
         <div class="cp-form-field">
           <label class="cp-flabel">Start Date</label>
-          <input class="cp-finput" id="cpStartDate" type="date" value="${isoDateOrBlank(project.startDate)}" ${canEditDates ? '' : 'disabled'}/>
+          <input class="cp-finput" id="cpStartDate" type="date" value="${isoDateOrBlank(project.startDate)}" ${canEdit ? '' : 'disabled'}/>
         </div>
 
         <div class="cp-form-field">
-          <label class="cp-flabel">End Date</label>
-          <input class="cp-finput" id="cpEndDate" type="date" value="${isoDateOrBlank(project.endDate)}" ${canEditDates ? '' : 'disabled'}/>
+          <label class="cp-flabel">Started By <span class="cp-hint">— view only</span></label>
+          <input class="cp-finput" value="${esc(project.startedBy || '—')}" disabled/>
         </div>
 
+        ${isManager ? `
         <div class="cp-form-field">
-          <label class="cp-flabel">Views Completed</label>
-          <input class="cp-finput" id="cpCompleted" type="number" min="0" value="${project.completedViews || ''}" placeholder="0"/>
-        </div>
-      </div>
-
-      <div class="cp-form-field" style="margin-top:.2rem;">
-        <label class="cp-flabel">Manager Notes ${isManager ? '' : '<span class="cp-hint">— view only</span>'}</label>
-        <textarea class="cp-finput" id="cpMgrNotes" rows="2" maxlength="${CP_NOTES_MAX_LENGTH}" ${isManager ? '' : 'disabled'}
-          oninput="updateCPNotesCount('cpMgrNotes','cpMgrNotesCount')"
-          placeholder="${isManager ? 'Notes only you can edit…' : ''}">${esc(project.managerNotes)}</textarea>
-        ${isManager ? `<div id="cpMgrNotesCount" style="text-align:right;font-size:10px;color:var(--txt2);margin-top:2px;">${project.managerNotes.length}/${CP_NOTES_MAX_LENGTH}</div>` : ''}
-      </div>
-
-      <div class="cp-form-field">
-        <label class="cp-flabel">Team Leader Notes ${isTL ? '' : '<span class="cp-hint">— view only</span>'}</label>
-        <textarea class="cp-finput" id="cpTlNotes" rows="2" maxlength="${CP_NOTES_MAX_LENGTH}" ${isTL ? '' : 'disabled'}
-          oninput="updateCPNotesCount('cpTlNotes','cpTlNotesCount')"
-          placeholder="${isTL ? 'Notes only you can edit…' : ''}">${esc(project.teamLeaderNotes)}</textarea>
-        ${isTL ? `<div id="cpTlNotesCount" style="text-align:right;font-size:10px;color:var(--txt2);margin-top:2px;">${project.teamLeaderNotes.length}/${CP_NOTES_MAX_LENGTH}</div>` : ''}
+          <label class="cp-flabel">Project Constant</label>
+          <input class="cp-finput" id="cpConstant" type="number" step="any" min="0"
+            value="${project.projectConstant !== undefined && project.projectConstant !== '' ? esc(String(project.projectConstant)) : '0'}"/>
+        </div>` : ''}
       </div>
 
       <div style="display:flex;gap:8px;justify-content:space-between;align-items:center;margin-top:.4rem;">
@@ -1534,12 +1438,11 @@ async function openProjectDetail(content, projectId, opts = {}) {
     </div>`;
 
   // Existing projects get a two-column layout: the form stays a fixed,
-  // readable width on the left, and Timeline/Team Hours/Cost & Profit
-  // stack in the remaining space on the right — instead of everything
-  // stacking in one narrow centered column with the rest of a PC
-  // screen sitting empty. A brand-new (not-yet-created) project has
-  // none of those sections yet, so it just gets the form alone at a
-  // sensible width.
+  // readable width on the left, and Timeline/Team Hours stack in the
+  // remaining space on the right — instead of everything stacking in
+  // one narrow centered column. A brand-new (not-yet-created) project
+  // has none of those sections yet, so it just gets the form alone at
+  // a sensible width.
   const bodyHtml = isNew
     ? `<div style="max-width:620px;margin:0 auto;">${formCard}</div>`
     : `
@@ -1547,10 +1450,10 @@ async function openProjectDetail(content, projectId, opts = {}) {
         <div style="min-width:0;">
           ${formCard}
           <div id="cpTimelineSection" style="margin-top:1.25rem;"></div>
-          ${isManager ? `<div id="cpCostSection" style="margin-top:1.25rem;"></div>` : ''}
         </div>
         <div style="display:flex;flex-direction:column;gap:1.25rem;min-width:0;">
           <div id="cpTaskSection"></div>
+          <div id="cpSubtaskSection"></div>
           <div id="cpMonthlyPerfSection"></div>
           <div id="cpTeamSection"></div>
         </div>
@@ -1608,9 +1511,9 @@ async function openProjectDetail(content, projectId, opts = {}) {
 
   if (!isNew) renderProjectTimelineSection(project);
   if (!isNew) renderProjectTaskSection(project);
+  if (!isNew) renderProjectSubtasksSection(project);
   if (!isNew) renderProjectMonthlyPerfSection(project);
   if (!isNew) renderProjectTeamSection(project);
-  if (!isNew && isManager) renderProjectCostSection(project);
 
   // Auto-refresh the read-only dashboard sections every minute so
   // Timeline/Task Breakdown/Overall Performance/Team Performance/
@@ -1667,9 +1570,9 @@ function startProjectDetailAutoRefresh(content, projectId) {
 
     renderProjectTimelineSection(freshProject);
     renderProjectTaskSection(freshProject);
+    renderProjectSubtasksSection(freshProject);
     renderProjectMonthlyPerfSection(freshProject);
     renderProjectTeamSection(freshProject);
-    if (CP_ROLE === 'manager') renderProjectCostSection(freshProject);
   }, 60000);
 }
 
@@ -1715,59 +1618,26 @@ async function refreshCPTimesheetData() {
 
 async function saveProjectFromForm(content, isNew, originalProject, onDone) {
   const btn = $('cpSaveBtn');
-  const isManager = CP_ROLE === 'manager';
-  const isTL      = CP_ROLE === 'tl';
   const payload = { role: CP_ROLE };
 
-  if (isManager) {
-    const name     = $('cpName').value.trim();
-    const id       = $('cpId').value.trim();
-    const clientId = $('cpClient').value;
-    if (!name) { toast?.('e', 'Project Name is required'); return; }
-    if (!id)   { toast?.('e', 'Project ID is required');   return; }
+  const name     = $('cpName').value.trim();
+  const id       = $('cpId').value.trim();
+  const clientId = $('cpClient').value;
+  if (!name) { toast?.('e', 'Project Name is required'); return; }
+  if (!id)   { toast?.('e', 'Project ID is required');   return; }
 
-    payload.projectId       = id;
-    payload.projectName     = name;
-    payload.clientId        = clientId;
-    payload.projectConstant = $('cpConstant').value.trim();
-    payload.projectValue    = parseFloat($('cpValue').value) || 0;
-    payload.plannedViews    = parseFloat($('cpPlanned').value) || 0;
-    payload.status          = $('cpStatus').value;
-    payload.startDate       = $('cpStartDate').value;
-    payload.endDate         = $('cpEndDate').value;
-    payload.completedViews  = parseFloat($('cpCompleted').value) || 0;
-    payload.managerNotes    = $('cpMgrNotes').value.trim();
-    if (!isNew) payload.originalProjectId = originalProject.projectId;
-  } else if (isTL && isNew) {
-    // Team Leader creating a new project — same core fields a
-    // Manager would set, but never Project Constant/Value (Team
-    // Leader never sees those, even at creation — they stay blank
-    // until a Manager fills them in via edit).
-    const name     = $('cpName').value.trim();
-    const id       = $('cpId').value.trim();
-    const clientId = $('cpClient').value;
-    if (!name) { toast?.('e', 'Project Name is required'); return; }
-    if (!id)   { toast?.('e', 'Project ID is required');   return; }
-
-    payload.projectId      = id;
-    payload.projectName    = name;
-    payload.clientId       = clientId;
-    payload.plannedViews   = parseFloat($('cpPlanned').value) || 0;
-    payload.status         = $('cpStatus').value;
-    payload.startDate      = $('cpStartDate').value;
-    payload.endDate        = $('cpEndDate').value;
-    payload.teamLeaderNotes = $('cpTlNotes').value.trim();
-  } else {
-    // Team Leader editing an EXISTING project — Views Completed,
-    // their own Notes, Start/End Date, and now Status. Everything
-    // else (Name/ID/Client/Constant/Value/Planned) stays Manager-only.
-    payload.originalProjectId = originalProject.projectId;
-    payload.completedViews    = parseFloat($('cpCompleted').value) || 0;
-    payload.startDate         = $('cpStartDate').value;
-    payload.endDate           = $('cpEndDate').value;
-    payload.status            = $('cpStatus').value;
-    payload.teamLeaderNotes   = $('cpTlNotes').value.trim();
-  }
+  payload.projectId   = id;
+  payload.projectName = name;
+  payload.clientId    = clientId;
+  payload.status       = $('cpStatus').value;
+  payload.startDate    = $('cpStartDate').value;
+  // Project Constant — only present in the form (and thus in this
+  // payload) for the Manager role; the backend also independently
+  // ignores it from anyone else, so this is belt-and-suspenders, not
+  // the only enforcement.
+  const constantEl = $('cpConstant');
+  if (constantEl) payload.projectConstant = parseFloat(constantEl.value) || 0;
+  if (!isNew) payload.originalProjectId = originalProject.projectId;
 
   btn.disabled = true; btn.textContent = 'Saving…';
   try {
@@ -1875,6 +1745,14 @@ function fmtHM(hours) {
   if (h === 0) return `${m}m`;
   if (m === 0) return `${h}h`;
   return `${h}h ${m}m`;
+}
+
+// Project Constant → compact display (e.g. "1,250"). Plain number
+// formatting, not currency — Constant isn't necessarily a rupee
+// figure, just a project-level numeric weight the Manager assigns.
+function fmtCPConstant(n) {
+  const v = parseFloat(n) || 0;
+  return v.toLocaleString('en-IN', { maximumFractionDigits: 2 });
 }
 
 // A stacked segmented bar — one colored segment per employee, width
@@ -2040,7 +1918,6 @@ function renderProjectTimelineSection(project) {
 
   const totals = getProjectEmployeeTotals(project); // already includes historical hours
   const totalHours = totals.reduce((s, t) => s + t.hours, 0);
-  const isManager  = CP_ROLE === 'manager';
 
   if (totalHours === 0) {
     el.innerHTML = `
@@ -2061,29 +1938,6 @@ function renderProjectTimelineSection(project) {
     return `<div style="width:${segPct}%;height:100%;background:${getEmployeeColor(t.empId)};"
       title="${esc(t.name)}: ${fmtHM(t.hours)}"></div>`;
   }).join('');
-
-  // Constant / Value row — same fields and layout as the Client
-  // Detail page's Project Performance bars (buildProjectPerfRow),
-  // Manager-only per the existing server-side permission boundary
-  // (Code.gs strips Constant/Value for non-manager roles, this is
-  // just the matching UI-side gate).
-  let moneyHtml = '';
-  if (isManager) {
-    const constant = parseFloat(project.projectConstant) || 0;
-    const value    = parseFloat(project.projectValue) || 0;
-    const hasConstant = constant > 0;
-    moneyHtml = `
-      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);">
-        <div style="display:flex;align-items:center;gap:12px;">
-          <span style="flex:0 0 84px;font-size:10px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;">Constant</span>
-          <div style="flex:1;min-width:0;height:16px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;overflow:hidden;">
-            <div style="width:${hasConstant ? 100 : 0}%;height:100%;background:${hasConstant ? '#f59e0b' : 'var(--border-md)'};"></div>
-          </div>
-          <span style="flex:0 0 84px;text-align:right;font-size:13px;font-weight:700;color:var(--txt1);">${fmtCPRupees(constant)}</span>
-        </div>
-        <div style="font-size:10.5px;color:var(--txt2);margin-top:6px;padding-left:96px;">Value: ${fmtCPRupees(value)}</div>
-      </div>`;
-  }
 
   el.innerHTML = `
     <div class="cp-card">
@@ -2116,7 +1970,6 @@ function renderProjectTimelineSection(project) {
         details[open] summary .cp-cost-arrow { transform: rotate(90deg); }
         summary::-webkit-details-marker { display:none; }
       </style>
-      ${moneyHtml}
     </div>`;
 }
 
@@ -2319,6 +2172,124 @@ function renderProjectTaskSection(project) {
         <div style="font-size:11.5px;color:var(--txt2);">Total time consumed: ${fmtHM(grandTotal)}</div>
       </div>
       ${tasks.length ? rows : `<div style="font-size:12.5px;color:var(--txt2);">No tasked hours logged yet for this project.</div>`}
+    </div>`;
+}
+
+// ══════════════════════════════════════════════════════════════
+// SUBTASK BREAKDOWN — subtasks defined for this project (from the
+// Subtasks sheet, loaded into the SUBTASKS global by auth.js) with
+// hours logged against each, pulled from entries' subtaskId field
+// (see form.js's Subtask dropdown and Code.gs's EMP_HEADERS trailing
+// columns). Purely additive — a project with no matching Subtasks
+// sheet rows, or no entries logged against a subtask, still renders
+// fine, just with 0 hours or an empty list.
+// ══════════════════════════════════════════════════════════════
+function getProjectSubtaskBreakdown(project) {
+  const defined = (typeof SUBTASKS !== 'undefined' ? SUBTASKS : [])
+    .filter(s => s.pid === project.projectId);
+
+  const hoursBySubtask = {}; // { subtaskId: { byEmp: {empId: hours} } }
+  CP_TIMESHEET_DATA.forEach(e => {
+    if (e.project !== project.projectName || e.status === 'Leave' || !e.subtaskId) return;
+    if (!hoursBySubtask[e.subtaskId]) hoursBySubtask[e.subtaskId] = {};
+    hoursBySubtask[e.subtaskId][e.empId] = (hoursBySubtask[e.subtaskId][e.empId] || 0) + parseH(e.hours);
+  });
+
+  // Every subtask defined for this project shows up, even with 0
+  // hours — same "show the full list, not just what's in use"
+  // approach as the Task dropdown itself.
+  const rows = defined.map(s => {
+    const byEmp = hoursBySubtask[s.id] || {};
+    const employees = Object.entries(byEmp)
+      .map(([empId, hours]) => {
+        const emp = CP_EMPLOYEES.find(x => x.id === empId);
+        return { empId, name: emp ? emp.name : empId, hours };
+      })
+      .filter(t => t.hours > 0)
+      .sort((a, b) => b.hours - a.hours);
+    return { subtaskId: s.id, subtaskName: s.name, employees, totalHours: employees.reduce((sum, e) => sum + e.hours, 0) };
+  });
+
+  // Hours logged under a subtaskId that ISN'T in the Subtasks sheet
+  // (e.g. sheet row deleted after entries were already saved against
+  // it) still show up, labeled with just the raw ID, rather than
+  // silently disappearing.
+  const definedIds = new Set(defined.map(s => s.id));
+  Object.keys(hoursBySubtask).forEach(subtaskId => {
+    if (definedIds.has(subtaskId)) return;
+    const byEmp = hoursBySubtask[subtaskId];
+    const employees = Object.entries(byEmp)
+      .map(([empId, hours]) => {
+        const emp = CP_EMPLOYEES.find(x => x.id === empId);
+        return { empId, name: emp ? emp.name : empId, hours };
+      })
+      .filter(t => t.hours > 0)
+      .sort((a, b) => b.hours - a.hours);
+    if (employees.length) {
+      rows.push({ subtaskId, subtaskName: '(not in Subtasks sheet)', employees, totalHours: employees.reduce((sum, e) => sum + e.hours, 0) });
+    }
+  });
+
+  rows.sort((a, b) => b.totalHours - a.totalHours);
+  const grandTotal = rows.reduce((s, r) => s + r.totalHours, 0);
+  return { rows, grandTotal };
+}
+
+function renderProjectSubtasksSection(project) {
+  const el = $('cpSubtaskSection');
+  if (!el) return;
+
+  const { rows, grandTotal } = getProjectSubtaskBreakdown(project);
+
+  if (!rows.length) {
+    el.innerHTML = `
+      <div class="cp-card">
+        <div style="font-weight:700;font-size:14px;color:var(--txt1);margin-bottom:.5rem;">🧩 Subtasks</div>
+        <div style="font-size:12.5px;color:var(--txt2);">No subtasks defined for this project yet — add rows to the Subtasks sheet (Project ID = ${esc(project.projectId)}).</div>
+      </div>`;
+    return;
+  }
+
+  const maxSubHours = Math.max(...rows.map(r => r.totalHours), 0.01);
+
+  const rowsHtml = rows.map((r, i) => {
+    const hasHours = r.totalHours > 0;
+    const fillPct  = hasHours ? Math.max((r.totalHours / maxSubHours) * 100, 4) : 100;
+
+    const barHtml = hasHours
+      ? `<div style="flex:1;min-width:0;height:18px;border-radius:6px;background:var(--surface2);border:1px solid var(--border-md);overflow:hidden;">
+          <div style="width:${fillPct}%;height:100%;display:flex;">
+            ${r.employees.map((e, idx) => {
+              const pct = (e.hours / r.totalHours) * 100;
+              const isLastSeg = idx === r.employees.length - 1;
+              return `<div style="width:${pct}%;height:100%;background:${getEmployeeColor(e.empId)};
+                ${isLastSeg ? '' : 'border-right:2px solid rgba(255,255,255,.35);'}"
+                title="${esc(e.name)}: ${fmtHM(e.hours)}"></div>`;
+            }).join('')}
+          </div>
+        </div>`
+      : `<div style="flex:1;height:18px;border-radius:6px;border:1px solid var(--border-md);background:transparent;"></div>`;
+
+    return `
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+        <div style="flex:0 0 160px;font-size:12px;font-weight:600;color:var(--txt1);white-space:nowrap;
+          overflow:hidden;text-overflow:ellipsis;" title="${esc(r.subtaskId)} — ${esc(r.subtaskName)}">
+          ${esc(r.subtaskName)}
+          <div style="font-size:10px;color:var(--txt2);font-weight:400;">${esc(r.subtaskId)}</div>
+        </div>
+        ${barHtml}
+        <span style="flex:0 0 56px;text-align:right;font-size:11.5px;font-weight:${hasHours ? '700' : '400'};
+          color:${hasHours ? 'var(--txt1)' : 'var(--txt2)'};">${hasHours ? fmtHM(r.totalHours) : '—'}</span>
+      </div>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div class="cp-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;flex-wrap:wrap;gap:6px;">
+        <div style="font-weight:700;font-size:14px;color:var(--txt1);">🧩 Subtasks</div>
+        <div style="font-size:11.5px;color:var(--txt2);">${rows.length} subtask${rows.length !== 1 ? 's' : ''} · ${fmtHM(grandTotal)} total</div>
+      </div>
+      ${rowsHtml}
     </div>`;
 }
 
@@ -2674,7 +2645,6 @@ function buildProjectReportHTML(project, mode, targetMonth) {
       <div><b>Report Type</b>${esc(reportTypeLabel)}</div>
       <div><b>Period</b>${esc(periodLabel)}</div>
       <div><b>Start Date</b>${esc(fmtCPDateShort(project.startDate))}</div>
-      <div><b>End Date</b>${esc(fmtCPDateShort(project.endDate))}</div>
       <div><b>Status</b>${esc(project.status)}</div>
     </div>
 
@@ -2862,219 +2832,6 @@ function buildTeamDailyRow(date, dayData, isLast) {
     </div>`;
 }
 
-// ══════════════════════════════════════════════════════════════
-// COST / PROFIT CALCULATION — Manager view only (needs Project
-// Constant/Value, which Team Leaders never see). Fully automatic:
-//   For every month the project has logged hours →
-//     for every employee who logged hours that month →
-//       Employee Cost = Hours Worked × that employee's Points for
-//       that specific month (via salary.js's getEffectiveSalary,
-//       carry-forward aware)
-//   Monthly Total = sum of Employee Cost across employees
-//   Total Employee Cost = sum of Monthly Totals across every month
-//   Profit = Project Constant − Total Employee Cost (negative = Loss)
-// ══════════════════════════════════════════════════════════════
-async function renderProjectCostSection(project) {
-  const el = $('cpCostSection');
-  if (!el) return;
-  el.innerHTML = `<div class="mgr-loading"><div class="slot-spinner"></div><span>Calculating project cost…</span></div>`;
-
-  await ensureSalaryDataLoaded();
-
-  const result = await calculateProjectCost(project);
-  if (!result) {
-    el.innerHTML = `<div class="chart-empty">Timesheet or Salary data isn't available yet — cost can't be calculated.</div>`;
-    return;
-  }
-
-  const isProfit = result.profit >= 0;
-
-  // Missing Points means the cost above is understated — de-duplicate
-  // to unique (empName, month) pairs so the same person/month isn't
-  // listed once per timesheet entry.
-  const missingKey = m => `${m.empId}|${m.month}`;
-  const uniqueMissing = [...new Map(result.missingPoints.map(m => [missingKey(m), m])).values()]
-    .sort((a, b) => a.month.localeCompare(b.month) || a.empName.localeCompare(b.empName));
-
-  const missingWarning = uniqueMissing.length === 0 ? '' : `
-    <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:8px;padding:8px 10px;margin-bottom:1rem;font-size:11.5px;color:#92400e;">
-      ⚠️ Cost below is understated — no Salary Points set for:
-      ${uniqueMissing.map(m => `${esc(m.empName)} (${esc(fmtCPMonthLabel(m.month))})`).join(', ')}.
-      Set Points on the Salary tab to include their hours in the cost.
-    </div>`;
-
-  el.innerHTML = `
-    <div class="cp-card">
-      <div style="font-weight:700;font-size:14px;color:var(--txt1);margin-bottom:.9rem;">💰 Project Cost &amp; Profit</div>
-      ${missingWarning}
-
-      ${result.months.length === 0
-        ? `<div style="font-size:12.5px;color:var(--txt2);">No timesheet hours logged against this project yet.</div>`
-        : `
-        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:1rem;">
-          ${result.months.map(m => `
-            <details style="background:var(--surface2);border-radius:7px;">
-              <summary style="display:flex;align-items:center;justify-content:space-between;font-size:12px;
-                padding:6px 8px;cursor:pointer;list-style:none;">
-                <span style="display:flex;align-items:center;gap:5px;color:var(--txt1);font-weight:600;">
-                  <span class="cp-cost-arrow" style="font-size:9px;color:var(--txt2);transition:transform .15s;">▶</span>
-                  ${esc(fmtCPMonthLabel(m.month))}
-                  <span style="color:var(--txt2);font-weight:400;">· ${m.employees.length} employee${m.employees.length !== 1 ? 's' : ''}</span>
-                </span>
-                <span style="color:var(--txt2);">${m.hours.toFixed(1)}h</span>
-                <span style="color:var(--txt1);font-weight:700;">${fmtCPConstant(m.cost)}</span>
-              </summary>
-              <div style="padding:2px 8px 8px 25px;display:flex;flex-direction:column;gap:2px;">
-                ${m.employees.map(e => `
-                  <div style="display:flex;align-items:center;justify-content:space-between;font-size:11px;
-                    padding:4px 0;border-top:1px solid var(--border);">
-                    <span style="color:var(--txt1);font-weight:600;">${esc(e.name)}</span>
-                    <span style="color:var(--txt2);">${e.hours.toFixed(1)}h</span>
-                    <span style="color:var(--txt1);font-weight:600;">${fmtCPConstant(e.cost)}</span>
-                  </div>`).join('')}
-              </div>
-            </details>`).join('')}
-        </div>
-        <style>
-          .cp-cost-arrow { display:inline-block; }
-          details[open] summary .cp-cost-arrow { transform: rotate(90deg); }
-          summary::-webkit-details-marker { display:none; }
-        </style>`}
-
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-        <div style="background:var(--surface2);border-radius:10px;padding:10px 12px;">
-          <div style="font-size:10px;color:var(--txt2);text-transform:uppercase;letter-spacing:.5px;">Total Employee Cost</div>
-          <div style="font-size:16px;font-weight:800;color:var(--txt1);">${fmtCPConstant(result.totalCost)}</div>
-        </div>
-        <div style="background:var(--surface2);border-radius:10px;padding:10px 12px;">
-          <div style="font-size:10px;color:var(--txt2);text-transform:uppercase;letter-spacing:.5px;">Project Constant</div>
-          <div style="font-size:16px;font-weight:800;color:var(--txt1);">${fmtCPConstant(result.projectBudget)}</div>
-        </div>
-      </div>
-
-      <div style="margin-top:8px;background:${isProfit ? 'rgba(52,211,153,0.1)' : 'rgba(248,113,113,0.1)'};
-        border:1px solid ${isProfit ? 'rgba(52,211,153,0.3)' : 'rgba(248,113,113,0.3)'};
-        border-radius:10px;padding:10px 12px;text-align:center;">
-        <div style="font-size:10px;color:var(--txt2);text-transform:uppercase;letter-spacing:.5px;">${isProfit ? '📈 Profit' : '📉 Loss'}</div>
-        <div style="font-size:18px;font-weight:800;color:${isProfit ? '#34d399' : '#f87171'};">
-          ${isProfit ? '+' : '-'}${fmtCPConstant(Math.abs(result.profit))}</div>
-      </div>
-    </div>`;
-}
-
-// Reuses salary.js's own fetch instead of duplicating it — if the
-// Manager opens Project before ever visiting the Salary tab,
-// SAL_RECORDS would otherwise be empty and every Points lookup would
-// silently return 0.
-async function ensureSalaryDataLoaded() {
-  if (typeof SAL_RECORDS === 'undefined') return; // salary.js not loaded — cost calc will just show 0s
-  if (SAL_RECORDS.length > 0) return;
-  if (typeof loadSalaryData === 'function') {
-    try { await loadSalaryData(); } catch(e) { /* leave SAL_RECORDS empty, calc below handles it gracefully */ }
-  }
-}
-
-// Month-name → number, for converting Historical Import's records
-// ('January'..'December' + a separate year field) into the same
-// 'YYYY-MM' keys used everywhere else in this cost calculation.
-const HIST_MONTH_NUM = {
-  January: 1, February: 2, March: 3, April: 4, May: 5, June: 6,
-  July: 7, August: 8, September: 9, October: 10, November: 11, December: 12,
-};
-
-async function calculateProjectCost(project) {
-  const projectEntries = CP_TIMESHEET_DATA.filter(e => e.project === project.projectName && e.status !== 'Leave');
-
-  const byMonth = {}; // { 'YYYY-MM': { empId: hoursSum } }
-  projectEntries.forEach(e => {
-    const month = (e.date || '').slice(0, 7);
-    if (!month) return;
-    if (!byMonth[month]) byMonth[month] = {};
-    byMonth[month][e.empId] = (byMonth[month][e.empId] || 0) + parseH(e.hours);
-  });
-
-  // Pull in ALL historical hours imported for this project via
-  // Historical Import (Team Leader only). This was deliberately left
-  // disconnected from cost/profit when that feature was first built
-  // (see historical-import.js's own header comment) — wiring it in
-  // here means Project Constant vs. Employee Cost reflects the
-  // project's full lifetime, not just hours logged since the live
-  // timesheet system started. Every record for this Project ID is
-  // included, however many months back it goes — no cap, no limit.
-  //
-  // Reuses CP_HISTORICAL_DATA (the single unfiltered fetch already
-  // made by loadHistoricalData() before any caller of this function
-  // runs — see renderClientTab/renderProjectTab) instead of calling
-  // sheetGET itself. calculateProjectCost() is invoked once PER
-  // PROJECT inside Promise.all fan-outs (buildClientCostMap,
-  // renderClientProjectPerformanceInto) — if each call made its own
-  // network request, opening the Client tab with N projects fired N
-  // simultaneous getHistoricalRecords calls at the backend, which is
-  // what was causing the timeout/retry storm. Filtering the
-  // already-loaded array in memory is instant and makes zero network
-  // calls, matching the "reuse existing data flow" rule everywhere
-  // else in this file.
-  const histRecords = (typeof CP_HISTORICAL_DATA !== 'undefined' ? CP_HISTORICAL_DATA : [])
-    .filter(r => sameProjectId(r.projectId, project.projectId));
-  histRecords.forEach(r => {
-    const monthNum = HIST_MONTH_NUM[r.month];
-    if (!monthNum || !r.year) return;
-    const monthKey = `${r.year}-${String(monthNum).padStart(2, '0')}`;
-    if (!byMonth[monthKey]) byMonth[monthKey] = {};
-    // Historical hours are recorded as one total-hours number per
-    // employee per month (no daily entries), so this adds directly
-    // rather than needing per-entry parsing like live timesheet data.
-    byMonth[monthKey][r.employeeId] = (byMonth[monthKey][r.employeeId] || 0) + (parseFloat(r.totalHours) || 0);
-  });
-
-  const months = Object.keys(byMonth).sort();
-  let totalCost = 0;
-  const missingPoints = []; // [{ empId, empName, month }] — Points never set, silently counted as 0 cost
-  const byEmployee = {}; // { empId: { name, hours, cost, months: [{month, hours, cost}] } } — same hours×points math, both summed per employee AND kept per-month for the expandable breakdown
-  const monthBreakdown = months.map(month => {
-    let monthCost = 0;
-    let monthHours = 0;
-    const monthEmployees = []; // this month's per-employee breakdown, for the month-first expandable view
-    Object.entries(byMonth[month]).forEach(([empId, hours]) => {
-      monthHours += hours;
-      const empName = (typeof MGR_EMPLOYEES !== 'undefined' ? MGR_EMPLOYEES.find(e => e.id === empId)?.name : null) || empId;
-      const points = getMonthlyPointsForEmployee(empId, month, empName);
-      if (points === 0) {
-        missingPoints.push({ empId, empName, month });
-      }
-      const cost = hours * points;
-      monthCost += cost;
-      monthEmployees.push({ empId, name: empName, hours, cost });
-
-      if (!byEmployee[empId]) byEmployee[empId] = { empId, name: empName, hours: 0, cost: 0, months: [] };
-      byEmployee[empId].hours += hours;
-      byEmployee[empId].cost  += cost;
-      byEmployee[empId].months.push({ month, hours, cost });
-    });
-    totalCost += monthCost;
-    monthEmployees.sort((a, b) => b.cost - a.cost);
-    return { month, hours: monthHours, cost: monthCost, employees: monthEmployees };
-  });
-
-  // Project Constant is the project's allocated budget/value — this
-  // is what Profit is measured against (per the original spec's
-  // example: 8500 − 7748.5 = 751.5 Profit). Project Value is a
-  // separate field kept for reference but not used in this formula.
-  const totalHours   = monthBreakdown.reduce((s, m) => s + m.hours, 0);
-  const projectBudget = parseFloat(project.projectConstant) || 0;
-  const employeeCosts = Object.values(byEmployee).sort((a, b) => b.cost - a.cost);
-  return { months: monthBreakdown, totalCost, totalHours, projectBudget, profit: projectBudget - totalCost, missingPoints, employeeCosts };
-}
-
-// Looks up an employee's Points for one specific month via salary.js's
-// own carry-forward logic — the exact same number the Salary tab
-// itself would show for that employee that month.
-function getMonthlyPointsForEmployee(empId, month, empName) {
-  if (typeof getEffectiveSalary !== 'function') return 0;
-  const eff = getEffectiveSalary(empId, month, empName);
-  return eff && eff.record ? (parseFloat(eff.record.points) || 0) : 0;
-}
-
 function fmtCPMonthLabel(monthKey) {
   return new Date(monthKey + '-01').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
 }
@@ -3084,27 +2841,4 @@ function fmtCPDateShort(dateStr) {
   const d = new Date(dateStr + 'T00:00:00');
   if (isNaN(d.getTime())) return '—';
   return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
-}
-
-function fmtCPRupees(n) {
-  const v = parseFloat(n) || 0;
-  return '₹' + v.toLocaleString('en-IN', { maximumFractionDigits: 1 });
-}
-
-// Employee Effort/Cost figures (Hours × Points) and Project Constant
-// aren't currency — they're a scoring value, not real money — so no
-// rupee symbol here, just the number.
-function fmtCPConstant(n) {
-  const v = parseFloat(n) || 0;
-  return v.toLocaleString('en-IN', { maximumFractionDigits: 1 });
-}
-
-// Updates the "X/200" counter under a notes textarea as the person
-// types. maxlength on the textarea itself already prevents typing
-// past the cap — this is just the visible readout.
-function updateCPNotesCount(textareaId, counterId) {
-  const ta = document.getElementById(textareaId);
-  const el = document.getElementById(counterId);
-  if (!ta || !el) return;
-  el.textContent = `${ta.value.length}/${CP_NOTES_MAX_LENGTH}`;
 }
