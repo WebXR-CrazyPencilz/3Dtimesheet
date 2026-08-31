@@ -48,10 +48,17 @@ function renderHistoricalImportTab(content) {
 // ══════════════════════════════════════════════════
 function renderHistoricalLanding(content) {
   content.innerHTML = `
-    <div style="font-weight:700;font-size:16px;color:var(--txt1);margin-bottom:.2rem;">📜 Historical Timesheet Import</div>
-    <div style="font-size:12px;color:var(--txt2);margin-bottom:1.25rem;">
-      Enter old monthly total hours from before this system existed — a quick register, not a file import.
-      Only one total-hours number per employee per month is stored; no daily entries are ever created.
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:1.25rem;">
+      <div>
+        <div style="font-weight:700;font-size:16px;color:var(--txt1);margin-bottom:.2rem;">📜 Historical Timesheet Import</div>
+        <div style="font-size:12px;color:var(--txt2);">
+          Enter old monthly total hours from before this system existed — a quick register, not a file import.
+          Only one total-hours number per employee per month is stored; no daily entries are ever created.
+        </div>
+      </div>
+      <button id="histRefreshBtn" title="Refresh this tab's data" style="background:var(--elevated);
+        border:1px solid var(--border-md);border-radius:6px;color:var(--txt2);cursor:pointer;
+        padding:7px 10px;font-size:13px;line-height:1;display:flex;align-items:center;flex-shrink:0;">🔄</button>
     </div>
 
     <div class="cp-card" style="margin-bottom:1.25rem;max-width:640px;">
@@ -133,6 +140,16 @@ function renderHistoricalLanding(content) {
 
   content.querySelector('#histCreateBtn').addEventListener('click', createHistoricalSheet);
   content.querySelector('#histSearchBtn').addEventListener('click', runHistoricalSearch);
+
+  // Re-running this whole function is the correct "refresh" here —
+  // it already does everything a fresh open does (rebuild the form
+  // options from current TL_CLIENTS/TL_PROJECTS/TL_EMPLOYEES, then
+  // reload the existing-registers list), so there's no separate
+  // lighter-weight reload path to call instead.
+  content.querySelector('#histRefreshBtn').addEventListener('click', () => {
+    toast?.('s', 'Refreshed', 'Historical Import data is up to date.');
+    renderHistoricalLanding(content);
+  });
 
   loadHistoricalExistingList();
 }

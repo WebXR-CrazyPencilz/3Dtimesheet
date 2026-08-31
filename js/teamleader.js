@@ -122,10 +122,10 @@ function renderTLPortal() {
     <!-- Top nav tabs -->
     <div style="display:flex;gap:4px;margin-bottom:1.5rem;border-bottom:1px solid var(--border);padding-bottom:0;">
       ${[
-        { id:'project',    icon:'📁', label:'Projects & Clients' },
-        { id:'employees',  icon:'👥', label:'Employees'  },
-        { id:'attendance', icon:'🕒', label:'Attendance' },
-        { id:'historical', icon:'📜', label:'Historical Import' },
+        { id:'project',      icon:'📁', label:'Projects & Clients' },
+        { id:'employees',    icon:'👥', label:'Employees'  },
+        { id:'attendance',   icon:'🕒', label:'Attendance' },
+        { id:'historical',   icon:'📜', label:'Historical Import' },
       ].map(t => `
         <button class="tl-tab${TL_TAB===t.id?' active':''}" data-tab="${t.id}" style="
           padding:8px 16px;border:none;background:none;cursor:pointer;
@@ -201,13 +201,16 @@ function renderTLEmployeesTab(content) {
     </div>
 
     <!-- Range controls -->
-    <div class="mgr-controls">
+    <div class="mgr-controls" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
       <div class="chart-range" id="tlRange">
         <button class="rbtn${TL_RANGE==='day15'?' active':''}"  data-range="day15">15 Days</button>
         <button class="rbtn${TL_RANGE==='week'?' active':''}"   data-range="week">This Week</button>
         <button class="rbtn${TL_RANGE==='month'?' active':''}"  data-range="month">This Month</button>
         <button class="rbtn${TL_RANGE==='all'?' active':''}"    data-range="all">All Time</button>
       </div>
+      <button id="tlEmpRefreshBtn" title="Refresh this tab's data" style="background:var(--elevated);
+        border:1px solid var(--border-md);border-radius:6px;color:var(--txt2);cursor:pointer;
+        padding:7px 10px;font-size:13px;line-height:1;display:flex;align-items:center;">🔄</button>
     </div>
 
     <!-- 15-day scroll -->
@@ -221,6 +224,23 @@ function renderTLEmployeesTab(content) {
     <!-- Employee cards -->
     <div id="tlEmpCards"></div>
   `;
+
+  // Employees pulls from TL_EMPLOYEES/TL_DATA — the same bulk payload
+  // every TL tab shares — so the correct "refresh" here is the same
+  // full reload initTeamLeader() already does on first login, just
+  // re-invoked on demand. TL_TAB isn't touched by it, so it lands
+  // back on this tab once the reload finishes.
+  $('tlEmpRefreshBtn').addEventListener('click', async () => {
+    const btn = $('tlEmpRefreshBtn');
+    btn.disabled = true; btn.style.opacity = '.5';
+    try {
+      await initTeamLeader();
+      toast?.('s', 'Refreshed', 'Employee data is up to date.');
+    } catch (err) {
+      toast?.('e', 'Refresh failed', err.message);
+      btn.disabled = false; btn.style.opacity = '';
+    }
+  });
 
   $('tlRange').addEventListener('click', e => {
     const btn = e.target.closest('.rbtn');
