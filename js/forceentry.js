@@ -23,6 +23,18 @@
 let FE_EMP         = null;   // { id, name }
 let FE_DATE        = '';     // YYYY-MM-DD — the Not Logged day being resolved
 let FE_RETURN_TO   = null;   // callback invoked after a successful save (or Back)
+// Whatever's already saved for FE_EMP/FE_DATE, grouped by slot,
+// fetched fresh every time this page opens (see openForceEntry).
+// This page is no longer only reachable from truly-empty "Not
+// Logged" days — Manager/Team Leader/HR can now open it from the
+// Attendance grid on ANY day, including ones that already have
+// hours logged. Without loading what's actually there first, the
+// form used to always start from a blank Entry 1, and saving it
+// would silently overwrite (upsert by slot+entryNum) whatever real
+// data already existed for that entryNum. This is now populated
+// before renderForceEntrySlots() ever runs, so the form always
+// shows the real existing rows for editing.
+let FE_EXISTING     = { morning: [], afternoon: [] };
 
 const FE_MAX_ENTRIES_PER_SLOT = 4;
 const FE_MIN_NOTES_LENGTH     = 25;
@@ -59,6 +71,7 @@ function openForceEntry(empId, empName, dateStr, onDone) {
   FE_EMP       = { id: empId, name: empName };
   FE_DATE      = dateStr;
   FE_RETURN_TO = typeof onDone === 'function' ? onDone : null;
+  FE_EXISTING  = { morning: [], afternoon: [] }; // reset — populated below before any row renders
 
   // Shared with emp-detail.js: this page is used from the Manager,
   // Team Leader, AND HR portals, each with its own container. HR_MODE
@@ -154,6 +167,41 @@ function openForceEntry(empId, empName, dateStr, onDone) {
     else if (typeof openEmpDetail === 'function') openEmpDetail(empId, empName);
   });
 
+  loadFeExistingAndRender();
+}
+
+// Fetches whatever's already saved for FE_EMP/FE_DATE (both slots,
+// Extended included in the raw response but simply never rendered
+// here — same as before) and populates FE_EXISTING before the form
+// is built, so a day that already has hours logged shows those real
+// rows instead of a blank template. Shown-on-failure error state
+// deliberately does NOT fall back to rendering a blank form — that
+// silent fallback is exactly the bug this replaces (see FE_EXISTING
+// comment above).
+async function loadFeExistingAndRender() {
+  const container = $('feSlotsContainer');
+  if (container) container.innerHTML = `<div class="slot-loading"><div class="slot-spinner"></div><span>Loading this day's existing entries…</span></div>`;
+
+  try {
+    const data = await apiGetDaySlots(FE_EMP.id, FE_DATE);
+    const grouped = { morning: [], afternoon: [] };
+    (data.entries || []).forEach(e => {
+      if (grouped[e.slot]) grouped[e.slot].push(e);
+    });
+    Object.keys(grouped).forEach(s => grouped[s].sort((a, b) => a.entryNum - b.entryNum));
+    FE_EXISTING = grouped;
+  } catch (err) {
+    if (container) {
+      container.innerHTML = `
+        <div class="slot-error">
+          <div>Failed to load this day's existing entries: ${esc(err.message)}</div>
+          <button id="feRetryLoadExisting" class="btn bghost" style="margin-top:.75rem">↻ Retry</button>
+        </div>`;
+      $('feRetryLoadExisting')?.addEventListener('click', () => loadFeExistingAndRender());
+    }
+    return;
+  }
+
   renderForceEntrySlots();
 }
 
@@ -170,6 +218,29 @@ function renderForceEntrySlots() {
 
 function renderFeSlotBlock(slotKey) {
   const meta = FE_SLOT_META[slotKey];
+  const existingAll = FE_EXISTING[slotKey] || [];
+  // Leave entries are never rendered as editable rows here — Force
+  // Entry always writes status:'Worked' (see buildForceEntry), so
+  // pre-filling a Leave entry into an editable row and letting it
+  // pass validation unchanged would silently flip it to Worked on
+  // save. Force Leave (on the Attendance grid) is the correct place
+  // to edit an actual Leave entry; this just leaves it alone and
+  // says so.
+  const editable = existingAll.filter(e => e.status !== 'Leave');
+  const leaveEntries = existingAll.filter(e => e.status === 'Leave');
+  const maxEntryNum = existingAll.reduce((m, e) => Math.max(m, e.entryNum), 0);
+  const atMax = existingAll.length >= FE_MAX_ENTRIES_PER_SLOT;
+
+  const rowsHtml = editable.length
+    ? editable.map(e => renderFeEntryRow(slotKey, e.entryNum, e)).join('')
+    : renderFeEntryRow(slotKey, maxEntryNum + 1, null);
+
+  const leaveNote = leaveEntries.length ? `
+    <div style="font-size:11px;color:#fbbf24;margin:2px 0 10px;">
+      🏖 Entry ${leaveEntries.map(e => e.entryNum).join(', ')} in this slot ${leaveEntries.length > 1 ? 'are' : 'is'} already marked Leave —
+      use Force Leave on the Attendance grid to change ${leaveEntries.length > 1 ? 'them' : 'it'} instead.
+    </div>` : '';
+
   return `
   <div class="slot-block" id="feSlot-${slotKey}">
     <div class="slot-header">
@@ -178,12 +249,14 @@ function renderFeSlotBlock(slotKey) {
         <span class="slot-label">${meta.label}</span>
         <span class="slot-time-range">${meta.defaultIn} – ${meta.defaultOut}</span>
       </div>
-      <button class="add-entry-btn" onclick="addFeEntry('${slotKey}')" title="Add another project in this slot">
+      <button class="add-entry-btn" onclick="addFeEntry('${slotKey}')" title="Add another project in this slot"
+        ${atMax ? 'style="display:none;"' : ''}>
         + Add Project
       </button>
     </div>
+    ${leaveNote}
     <div class="slot-entries" id="feEntries-${slotKey}">
-      ${renderFeEntryRow(slotKey, 1)}
+      ${rowsHtml}
     </div>
   </div>`;
 }
@@ -199,9 +272,33 @@ function renderFeLunchBlock() {
 }
 
 // ── ONE ENTRY ROW (same fields/validations as form.js, minus per-row Save/Leave) ──
-function renderFeEntryRow(slotKey, entryNum) {
+// `existing`, when passed, pre-fills every field from a real saved
+// entry — used when this day already has data (see FE_EXISTING).
+// entryNum is always the entry's REAL entryNum (existing or newly
+// assigned), never a renumbered position, so saving a row always
+// upserts the correct slot+entryNum instead of accidentally landing
+// on a different existing entry.
+function renderFeEntryRow(slotKey, entryNum, existing) {
   const meta = FE_SLOT_META[slotKey];
   const id   = `fe-${slotKey}-${entryNum}`;
+
+  const timeIn    = existing?.timeIn  || meta.defaultIn;
+  const timeOut   = existing?.timeOut || meta.defaultOut;
+  const clientId  = existing?.clientId  || '';
+  const projectId = existing?.projectId || '';
+  const task      = existing?.task  || '';
+  const notes     = existing?.notes || '';
+  const hours     = existing?.hours || '';
+
+  const projectOptions = clientId
+    ? PROJECTS.filter(p => p.cid === clientId).map(p =>
+        `<option value="${p.id}" data-n="${p.name}"${p.id === projectId ? ' selected' : ''}>${p.name}</option>`
+      ).join('')
+    : '';
+
+  const noteCounter = notes.length >= FE_MIN_NOTES_LENGTH
+    ? `${notes.length}/300`
+    : `${notes.length}/${FE_MIN_NOTES_LENGTH} minimum`;
 
   return `
   <div class="entry-row" id="feEntry-${id}" data-slot="${slotKey}" data-num="${entryNum}">
@@ -215,18 +312,18 @@ function renderFeEntryRow(slotKey, entryNum) {
     <div class="entry-times">
       <div class="fg">
         <label class="flabel">Time In</label>
-        <input type="time" class="fc time-inp" id="fetin-${id}" value="${meta.defaultIn}"
+        <input type="time" class="fc time-inp" id="fetin-${id}" value="${timeIn}"
           min="${meta.displayMin}" max="${meta.maxTime}" onchange="calcFeHours('${id}')" />
       </div>
       <div class="time-arrow">→</div>
       <div class="fg">
         <label class="flabel">Time Out</label>
-        <input type="time" class="fc time-inp" id="fetout-${id}" value="${meta.defaultOut}"
+        <input type="time" class="fc time-inp" id="fetout-${id}" value="${timeOut}"
           min="${meta.displayMin}" max="${meta.maxTime}" onchange="calcFeHours('${id}')" />
       </div>
       <div class="fg hours-display">
         <label class="flabel">Hours</label>
-        <div class="hours-badge" id="fehrs-${id}">—</div>
+        <div class="hours-badge" id="fehrs-${id}">${hours ? fmtFeHours(hours) : '—'}</div>
       </div>
     </div>
     <div class="slot-time-hint">Allowed range: ${meta.displayMin} – ${meta.maxTime}</div>
@@ -237,7 +334,7 @@ function renderFeEntryRow(slotKey, entryNum) {
         <div class="swrap">
           <select class="fc client-sel" id="fecsel-${id}" onchange="onFeClientChange('${id}')">
             <option value="">— Client —</option>
-            ${CLIENTS.map(c => `<option value="${c.id}" data-n="${c.name}">${c.name}</option>`).join('')}
+            ${CLIENTS.map(c => `<option value="${c.id}" data-n="${c.name}"${c.id === clientId ? ' selected' : ''}>${c.name}</option>`).join('')}
           </select>
           <svg class="sarr" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
         </div>
@@ -245,8 +342,9 @@ function renderFeEntryRow(slotKey, entryNum) {
       <div class="fg">
         <label class="flabel">Project <span class="req">*</span></label>
         <div class="swrap">
-          <select class="fc project-sel" id="fepsel-${id}" disabled>
-            <option value="">— Select client first —</option>
+          <select class="fc project-sel" id="fepsel-${id}" ${clientId ? '' : 'disabled'}>
+            <option value="">— ${clientId ? 'Project' : 'Select client first'} —</option>
+            ${projectOptions}
           </select>
           <svg class="sarr" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
         </div>
@@ -256,7 +354,7 @@ function renderFeEntryRow(slotKey, entryNum) {
         <div class="swrap">
           <select class="fc" id="fetsel-${id}">
             <option value="">— Task —</option>
-            ${FE_TASKS.map(t => `<option>${t}</option>`).join('')}
+            ${FE_TASKS.map(t => `<option${t === task ? ' selected' : ''}>${t}</option>`).join('')}
           </select>
           <svg class="sarr" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
         </div>
@@ -267,10 +365,19 @@ function renderFeEntryRow(slotKey, entryNum) {
       <label class="flabel">Notes <span class="req">*</span></label>
       <textarea class="fc ta" id="fenotes-${id}" rows="2"
         placeholder="What did the employee work on? (min ${FE_MIN_NOTES_LENGTH} characters)" maxlength="300"
-        oninput="updateFeNotesCount('${id}')"></textarea>
-      <div class="tafoot"><span class="cc" id="fecc-${id}">0/${FE_MIN_NOTES_LENGTH} minimum</span></div>
+        oninput="updateFeNotesCount('${id}')">${notes}</textarea>
+      <div class="tafoot"><span class="cc" id="fecc-${id}">${noteCounter}</span></div>
     </div>
   </div>`;
+}
+
+function fmtFeHours(h) {
+  const totalMins = Math.round(Number(h) * 60);
+  const hh = Math.floor(totalMins / 60);
+  const mm = totalMins % 60;
+  if (hh === 0) return `${mm}m`;
+  if (mm === 0) return `${hh}h`;
+  return `${hh}h ${mm}m`;
 }
 
 // ── ADD / REMOVE ENTRY ROW (mirrors form.js) ───────────────────
@@ -278,17 +385,29 @@ function addFeEntry(slotKey) {
   const container = $(`feEntries-${slotKey}`);
   if (!container) return;
   const domRows = container.querySelectorAll('.entry-row');
-  if (domRows.length >= FE_MAX_ENTRIES_PER_SLOT) {
+  const existingAll = FE_EXISTING[slotKey] || [];
+  // The real cap is on total entries for this slot+date (Leave
+  // entries count too, per Code.gs's saveSlot), not just how many
+  // editable rows happen to be rendered here.
+  const totalCount = Math.max(domRows.length, existingAll.length);
+  if (totalCount >= FE_MAX_ENTRIES_PER_SLOT) {
     toast?.('i', 'Max 4 entries per slot');
     return;
   }
-  const newNum = domRows.length + 1;
+  // Next entryNum must be higher than EVERY entryNum already in use
+  // for this slot+date — including a Leave entry that isn't even
+  // rendered as a row — or a new row here would silently collide
+  // with (and overwrite) that existing entry on save.
+  const domMaxNum = Array.from(domRows).reduce((m, r) => Math.max(m, parseInt(r.dataset.num, 10) || 0), 0);
+  const existingMaxNum = existingAll.reduce((m, e) => Math.max(m, e.entryNum), 0);
+  const newNum = Math.max(domMaxNum, existingMaxNum) + 1;
+
   const div = document.createElement('div');
-  div.innerHTML = renderFeEntryRow(slotKey, newNum);
+  div.innerHTML = renderFeEntryRow(slotKey, newNum, null);
   container.appendChild(div.firstElementChild);
 
   const addBtn = document.querySelector(`#feSlot-${slotKey} .add-entry-btn`);
-  if (addBtn && (domRows.length + 1) >= FE_MAX_ENTRIES_PER_SLOT) addBtn.style.display = 'none';
+  if (addBtn && (totalCount + 1) >= FE_MAX_ENTRIES_PER_SLOT) addBtn.style.display = 'none';
 }
 
 function removeFeEntry(slotKey, entryNum) {
@@ -347,8 +466,15 @@ function updateFeNotesCount(id) {
 // ══════════════════════════════════════════════════════════════
 // SAVE FORCE ENTRY — validates every touched row (same rules as
 // form.js's saveEntry), then writes each via the existing
-// apiSaveSlot() API. No backend changes. Every save creates NEW
-// entries — nothing here overwrites the employee's existing history.
+// apiSaveSlot() API. No backend changes. Each row upserts by its
+// real slot+entryNum — for a genuinely empty day that always means
+// a brand-new entry, but for a day that already had data (this page
+// is now reachable from any day on the Attendance grid, not just
+// empty ones), a saved row here OVERWRITES the matching existing
+// entryNum with whatever's currently in that row's fields. That's
+// exactly why every row is pre-filled from the real existing data
+// on open (see FE_EXISTING/loadFeExistingAndRender) — a row nobody
+// touched still round-trips its original values back out unchanged.
 // ══════════════════════════════════════════════════════════════
 async function saveForceEntryAll() {
   const btn      = $('feSaveAllBtn');
