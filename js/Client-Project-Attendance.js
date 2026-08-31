@@ -98,6 +98,9 @@ function renderAttendanceTab(content) {
           border-radius:6px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:6px;">
           ⬇ Export PDF
         </button>
+        <button id="attendRefreshBtn" title="Refresh this tab's data" style="background:var(--elevated);
+          border:1px solid var(--border-md);border-radius:6px;color:var(--txt2);cursor:pointer;
+          padding:7px 10px;font-size:13px;line-height:1;display:flex;align-items:center;">🔄</button>
         ${getCPRole() === 'hr' ? `
         <button id="attendPushHoliday" style="background:#fbbf24;color:#1a1a2e;border:none;
           border-radius:6px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:6px;">
@@ -150,6 +153,22 @@ function renderAttendanceTab(content) {
 
   $('attendExportPdf').addEventListener('click', () => exportAttendanceToPDF());
   $('attendPushHoliday')?.addEventListener('click', () => openBulkHolidayModal());
+  $('attendRefreshBtn').addEventListener('click', async () => {
+    const btn = $('attendRefreshBtn');
+    btn.disabled = true; btn.style.opacity = '.5';
+    try {
+      // Same underlying reload Client-Project.js's own auto-refresh
+      // uses (one bulk request for TL, per-employee for Manager/HR) —
+      // no second data-fetching implementation for this tab.
+      if (typeof refreshCPTimesheetData === 'function') await refreshCPTimesheetData();
+      toast?.('s', 'Refreshed', 'Attendance data is up to date.');
+    } catch (err) {
+      toast?.('e', 'Refresh failed', err.message);
+    }
+    renderAttendanceGrid();
+    const freshBtn = $('attendRefreshBtn');
+    if (freshBtn) { freshBtn.disabled = false; freshBtn.style.opacity = ''; }
+  });
 
   renderAttendanceGrid();
 }
@@ -287,6 +306,17 @@ function renderAttendanceGrid() {
 
   const tod      = todayStr();
   const isHR     = getCPRole() === 'hr';
+  // Team Leader gets the same "click any date for any employee"
+  // reach HR has — previously Team Leader (like Manager) could only
+  // click a day that already had NOTHING logged ("✕ No Entry"), via
+  // the `clickable` flag below, which meant a wrong/missed entry on
+  // an already-logged day couldn't be corrected at all. HR was never
+  // limited that way. This does NOT extend to Force Holiday or
+  // Biometric Punch — those stay HR-only (see openHRCellMenu below
+  // and Code.gs's saveBiometricPunch role check) — just Force Entry
+  // and Force Leave on any day, which Team Leader could already do
+  // on "No Entry" days.
+  const isTL     = getCPRole() === 'tl';
   // Sticky right-edge offsets for the summary columns, indexed left
   // to right (Leave Days, Permission Hrs, Working Days, Total Hours,
   // Overtime, [Biometric Hours if HR]). HR gets one extra column, so
@@ -321,32 +351,33 @@ function renderAttendanceGrid() {
 
   wrap.innerHTML = `
     ${truncNote}
-    <div style="background:var(--surface1);border:1px solid var(--border);border-radius:12px;overflow-x:auto;">
+    <div style="background:var(--surface1);border:1px solid var(--border);border-radius:12px;
+      max-height:70vh;overflow-x:auto;overflow-y:auto;">
       <table style="width:100%;border-collapse:separate;border-spacing:0;font-size:11.5px;">
         <thead>
           <tr>
             <th style="text-align:left;padding:9px 12px;background:var(--surface2);color:var(--txt2);
-              font-size:10.5px;text-transform:uppercase;white-space:nowrap;position:sticky;left:0;z-index:1;">Employee</th>
+              font-size:10.5px;text-transform:uppercase;white-space:nowrap;position:sticky;top:0;left:0;z-index:3;">Employee</th>
             ${days.map(d => `<th style="text-align:center;padding:9px 8px;background:var(--surface2);color:var(--txt2);
-              font-size:10px;white-space:nowrap;">${new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}</th>`).join('')}
+              font-size:10px;white-space:nowrap;position:sticky;top:0;z-index:1;">${new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}</th>`).join('')}
             <th style="text-align:center;padding:9px 6px;background:var(--surface2);color:var(--txt2);
               font-size:10px;text-transform:uppercase;white-space:nowrap;border-left:2px solid var(--border);
-              position:sticky;right:${off[0]}px;width:100px;min-width:100px;max-width:100px;box-sizing:border-box;z-index:1;">Leave<br/>Days</th>
+              position:sticky;top:0;right:${off[0]}px;width:100px;min-width:100px;max-width:100px;box-sizing:border-box;z-index:2;">Leave<br/>Days</th>
             <th style="text-align:center;padding:9px 6px;background:var(--surface2);color:var(--txt2);
               font-size:10px;text-transform:uppercase;white-space:nowrap;
-              position:sticky;right:${off[1]}px;width:100px;min-width:100px;max-width:100px;box-sizing:border-box;z-index:1;">Permission<br/>Hrs</th>
+              position:sticky;top:0;right:${off[1]}px;width:100px;min-width:100px;max-width:100px;box-sizing:border-box;z-index:2;">Permission<br/>Hrs</th>
             <th style="text-align:center;padding:9px 6px;background:var(--surface2);color:var(--txt2);
               font-size:10px;text-transform:uppercase;white-space:nowrap;
-              position:sticky;right:${off[2]}px;width:100px;min-width:100px;max-width:100px;box-sizing:border-box;z-index:1;">Working<br/>Days</th>
+              position:sticky;top:0;right:${off[2]}px;width:100px;min-width:100px;max-width:100px;box-sizing:border-box;z-index:2;">Working<br/>Days</th>
             <th style="text-align:center;padding:9px 6px;background:var(--surface2);color:var(--txt2);
               font-size:10px;text-transform:uppercase;white-space:nowrap;
-              position:sticky;right:${off[3]}px;width:100px;min-width:100px;max-width:100px;box-sizing:border-box;z-index:1;">Total<br/>Hours</th>
+              position:sticky;top:0;right:${off[3]}px;width:100px;min-width:100px;max-width:100px;box-sizing:border-box;z-index:2;">Total<br/>Hours</th>
             <th style="text-align:center;padding:9px 6px;background:var(--surface2);color:var(--txt2);
               font-size:10px;text-transform:uppercase;white-space:nowrap;
-              position:sticky;right:${off[4]}px;width:100px;min-width:100px;max-width:100px;box-sizing:border-box;z-index:1;">Overtime</th>
+              position:sticky;top:0;right:${off[4]}px;width:100px;min-width:100px;max-width:100px;box-sizing:border-box;z-index:2;">Overtime</th>
             ${isHR ? `<th style="text-align:center;padding:9px 6px;background:var(--surface2);color:var(--txt2);
               font-size:10px;text-transform:uppercase;white-space:nowrap;
-              position:sticky;right:${off[5]}px;width:100px;min-width:100px;max-width:100px;box-sizing:border-box;z-index:1;" title="Total hours computed from recorded biometric punch times, not self-logged hours.">Biometric<br/>Hours</th>` : ''}
+              position:sticky;top:0;right:${off[5]}px;width:100px;min-width:100px;max-width:100px;box-sizing:border-box;z-index:2;" title="Total hours computed from recorded biometric punch times, not self-logged hours.">Biometric<br/>Hours</th>` : ''}
           </tr>
         </thead>
         <tbody>
@@ -419,6 +450,10 @@ function renderAttendanceGrid() {
                       data-bio-in="${esc(status.biometric?.in || '')}" data-bio-out="${esc(status.biometric?.out || '')}"
                       style="padding:8px;text-align:center;white-space:nowrap;cursor:pointer;" title="Click to record/edit biometric punch">${cell}</td>`;
                 }
+                if (isTL) {
+                  return `<td class="attend-tl-any-cell" data-emp-id="${esc(emp.id)}" data-emp-name="${esc(emp.name)}" data-date="${d}"
+                      style="padding:8px;text-align:center;white-space:nowrap;cursor:pointer;" title="Click to Force Entry or Force Leave">${cell}</td>`;
+                }
                 return clickable
                   ? `<td class="attend-no-entry-cell" data-emp-id="${esc(emp.id)}" data-emp-name="${esc(emp.name)}" data-date="${d}"
                       style="padding:8px;text-align:center;white-space:nowrap;cursor:pointer;" title="Click to Force Entry or Force Leave">${cell}</td>`
@@ -453,6 +488,17 @@ function renderAttendanceGrid() {
     </div>`;
 
   wrap.querySelectorAll('.attend-no-entry-cell').forEach(cell => {
+    cell.addEventListener('click', () => {
+      openAttendanceCellMenu(cell, cell.dataset.empId, cell.dataset.empName, cell.dataset.date);
+    });
+  });
+
+  // Team Leader's "any date" cells — same Force Entry/Force Leave
+  // menu as the No-Entry-only cells above, just reachable from every
+  // day instead of only missed ones. See the isTL comment above for
+  // why this is scoped to Force Entry/Force Leave and not the extra
+  // HR-only actions.
+  wrap.querySelectorAll('.attend-tl-any-cell').forEach(cell => {
     cell.addEventListener('click', () => {
       openAttendanceCellMenu(cell, cell.dataset.empId, cell.dataset.empName, cell.dataset.date);
     });

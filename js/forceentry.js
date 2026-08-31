@@ -111,11 +111,7 @@ function openForceEntry(empId, empName, dateStr, onDone) {
 
         <div class="fg">
           <label class="flabel">Entered By</label>
-          <input class="fc" id="feEnteredByName" value="${esc(enteredBy.name)}" readonly />
-        </div>
-        <div class="fg" style="margin-top:.6rem;">
-          <label class="flabel">Role</label>
-          <input class="fc" id="feEnteredByRole" value="${esc(enteredBy.role)}" readonly />
+          <input class="fc" id="feEnteredByName" value="${esc(enteredBy.role)}" readonly />
         </div>
         <div class="fg" style="margin-top:.6rem;">
           <label class="flabel">Reason <span class="req">*</span></label>
