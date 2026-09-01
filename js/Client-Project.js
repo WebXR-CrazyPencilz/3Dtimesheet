@@ -87,7 +87,29 @@ function sameProjectId(a, b) {
 }
 
 function isoDateOrBlank(v) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : '';
+  if (!v) return '';
+  const s = String(v).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // The Start Date column is frequently a manually-typed TEXT cell in
+  // the sheet (DD-MM-YYYY or DD/MM/YYYY, matching the format used
+  // everywhere else in this app) rather than an actual Date cell —
+  // Code.gs's safeStr() only auto-converts a real Date object to
+  // ISO, so a text date like "21-08-2026" arrives here unconverted.
+  // An <input type="date"> silently shows blank for anything that
+  // isn't exact ISO, which is why a date that's really there could
+  // look missing. Parse the common non-ISO shapes instead of just
+  // discarding them.
+  let m = /^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/.exec(s);
+  if (m) {
+    const [, d, mo, y] = m;
+    return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+  m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/.exec(s);
+  if (m) {
+    const [, y, mo, d] = m;
+    return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+  return '';
 }
 
 let CP_TIMESHEET_DATA = [];     // all employee timesheet entries — forwarded by whichever portal is active
@@ -437,6 +459,87 @@ ClientProjectAPI.ingestTimesheetData = function(entries) {
 // ══════════════════════════════════════════════════════════════
 let CP_HISTORICAL_DATA = []; // pre-system monthly-total records from Historical Import — { clientId, projectId, month, year, employeeId, employeeName, totalHours, ... }
 
+// ── PROFIT / LOSS — Manager only. Revenue = Project Constant.
+// Cost = hours logged on the project × that employee's POINTS value
+// for that specific month — NOT an hourly rate, NOT LPA. Points is a
+// per-employee constant set in the Master Salary Database (salary.js)
+// and resolved with the same carry-forward logic the Salary tab
+// itself uses (getEffectiveSalary), so this always matches exactly
+// what the Salary tab would show for that employee that month.
+//
+// This depends on salary.js being loaded on the page (it defines
+// SAL_RECORDS, loadSalaryData, and getEffectiveSalary as globals) —
+// if it isn't, cost silently computes as 0 rather than throwing,
+// same graceful-degradation behavior the app's own
+// calculateProjectCost() already uses elsewhere.
+async function ensureSalaryDataLoaded() {
+  if (typeof SAL_RECORDS === 'undefined') return; // salary.js not loaded — cost calc will just show 0s
+  if (SAL_RECORDS.length > 0) return;
+  if (typeof loadSalaryData === 'function') {
+    try { await loadSalaryData(); } catch (e) { /* leave SAL_RECORDS empty, calc below handles it gracefully */ }
+  }
+}
+
+// This project's hours for one employee, broken down by month —
+// needed because Points can differ month to month (carry-forward
+// resolves independently per month).
+function getProjectMonthlyHoursByEmployee(project) {
+  const byEmpMonth = {}; // { empId: { 'YYYY-MM': hours } }
+
+  CP_TIMESHEET_DATA.forEach(e => {
+    if (e.project !== project.projectName || e.status === 'Leave' || !e.date) return;
+    const month = e.date.slice(0, 7);
+    if (!byEmpMonth[e.empId]) byEmpMonth[e.empId] = {};
+    byEmpMonth[e.empId][month] = (byEmpMonth[e.empId][month] || 0) + parseH(e.hours);
+  });
+
+  CP_HISTORICAL_DATA
+    .filter(h => sameProjectId(h.projectId, project.projectId))
+    .forEach(h => {
+      const month = histMonthYearToKey_(h.month, h.year);
+      if (!month || !h.employeeId) return;
+      if (!byEmpMonth[h.employeeId]) byEmpMonth[h.employeeId] = {};
+      byEmpMonth[h.employeeId][month] = (byEmpMonth[h.employeeId][month] || 0) + (Number(h.totalHours) || 0);
+    });
+
+  return byEmpMonth;
+}
+
+// Looks up an employee's Points for one specific month via salary.js's
+// own carry-forward logic — the exact same number the Salary tab
+// itself would show for that employee that month.
+function getMonthlyPointsForEmployee(empId, month, empName) {
+  if (typeof getEffectiveSalary !== 'function') return 0;
+  const eff = getEffectiveSalary(empId, month, empName);
+  return eff && eff.record ? (parseFloat(eff.record.points) || 0) : 0;
+}
+
+// Per-employee cost (hours × that month's Points, summed across every
+// month they logged hours on this project), plus the total cost and
+// a list of contributors with no Points set for ANY of their months
+// (so the Profit/Loss card can flag them instead of silently
+// under-counting cost).
+function getProjectCostBreakdown(project) {
+  const totals = getProjectEmployeeTotals(project); // [{ empId, name, hours }]
+  const byEmpMonth = getProjectMonthlyHoursByEmployee(project);
+  let totalCost = 0;
+  const missingPoints = [];
+
+  const rows = totals.map(t => {
+    const months = byEmpMonth[t.empId] || {};
+    let cost = 0;
+    Object.entries(months).forEach(([month, hrs]) => {
+      cost += hrs * getMonthlyPointsForEmployee(t.empId, month, t.name);
+    });
+    const hasPoints = cost > 0;
+    if (!hasPoints) missingPoints.push(t.name);
+    totalCost += cost;
+    return { empId: t.empId, name: t.name, hours: t.hours, cost, hasPoints };
+  });
+
+  return { rows, totalCost, missingPoints };
+}
+
 // Loaded alongside client/project master data every time Project or
 // Client tab opens (matches the "always fresh" pattern already used
 // for loadClientData/loadProjectData). Historical data is
@@ -579,6 +682,11 @@ async function renderProjectTab(content) {
     content.innerHTML = `<div class="slot-error">Failed to load projects: ${esc(err.message)}</div>`;
     return;
   }
+  // Salary data (Manager/TL only) has to be in hand BEFORE
+  // buildProjectCard runs, since that function is synchronous — the
+  // cost-vs-budget bar needs it to compute cost. Cached by salary.js
+  // itself (SAL_RECORDS), so this is a no-op on subsequent renders.
+  if (CP_ROLE === 'manager' || CP_ROLE === 'tl') await ensureSalaryDataLoaded();
   try {
     renderProjectList(content);
   } catch (err) {
@@ -616,6 +724,15 @@ async function refreshProjectTab(content) {
     toast?.('s', 'Refreshed', 'Projects & Clients data is up to date.');
   } catch (err) {
     toast?.('e', 'Refresh failed', err.message);
+  }
+  // Points can change too — force a fresh pull on manual refresh
+  // rather than relying on salary.js's cached SAL_RECORDS, since this
+  // is the "give me current data" button. Truncating SAL_RECORDS in
+  // place (it's salary.js's own array) makes ensureSalaryDataLoaded's
+  // "already loaded" check re-fetch, without needing a second global.
+  if (CP_ROLE === 'manager' || CP_ROLE === 'tl') {
+    if (typeof SAL_RECORDS !== 'undefined') SAL_RECORDS.length = 0;
+    await ensureSalaryDataLoaded();
   }
   try {
     renderProjectList(content);
@@ -1213,25 +1330,109 @@ function buildProjectCard(p) {
   const initials = (p.projectName || p.projectId || '?').trim().slice(0, 2).toUpperCase();
   const color  = getProjectColor(p.projectId);
 
+  const isManager = CP_ROLE === 'manager';
+  const isTL      = CP_ROLE === 'tl';
   const totals = getProjectEmployeeTotals(p); // already includes historical hours, see getProjectEmployeeTotals
   const totalHours = totals.reduce((s, t) => s + t.hours, 0);
 
   const endOrStatusLabel = 'Status';
   const endOrStatusValue = p.status;
 
-  // Segmented hours bar, one color per employee — same for every
-  // role, since Cost/Profit no longer exists as a data source
-  // (Clients-Projects has no Project Constant/Value columns).
-  const consumedBarHtml = totalHours > 0
-    ? totals.map((t, i) => {
-        const pct = (t.hours / totalHours) * 100;
-        return `<div style="width:${pct}%;height:100%;background:${getEmployeeColor(t.empId)};"
-          title="${esc(t.name)}: ${fmtHM(t.hours)}"></div>`;
-      }).join('')
-    : `<div style="width:100%;height:100%;background:var(--border-md);"></div>`;
-  const barLabelHtml = `<div style="font-size:9px;font-weight:700;color:var(--txt1);margin-bottom:3px;">
-      ${totalHours > 0 ? `${esc(fmtHM(totalHours))} consumed` : 'No hours logged yet'}
-    </div>`;
+  // The bar's full track length represents the Project Constant — a
+  // plain numeric budget value, NOT an hour count. What fills it is
+  // COST: each employee's hours on this project × their own Points
+  // value for that month (see getProjectCostBreakdown /
+  // getMonthlyPointsForEmployee), summed across everyone. Two
+  // employees logging identical hours at different Points fill the
+  // bar by different amounts — hours themselves never directly move
+  // the fill. The bar turns solid red the instant total cost exceeds
+  // the Constant.
+  //
+  // Manager sees the full picture: exact figures, and a bar segmented
+  // by employee so each person's share of cost is visible. Team
+  // Leader gets the SAME underlying cost-vs-budget calculation (so
+  // the bar behaves identically — green while under, red once over)
+  // but never sees a number: no cost figure, no budget figure, no
+  // per-employee breakdown — just the two-color signal.
+  let consumedBarHtml, barLabelHtml;
+
+  if (isManager) {
+    const { rows: costRows, totalCost } = getProjectCostBreakdown(p);
+    const budget = parseFloat(p.projectConstant) || 0;
+    const hasBudget = budget > 0;
+    const isOverBudget = hasBudget && totalCost > budget;
+    const fillPct = hasBudget
+      ? Math.min((totalCost / budget) * 100, 100)
+      : (totalCost > 0 ? 100 : 0);
+
+    if (!totalCost) {
+      consumedBarHtml = `<div style="width:100%;height:100%;background:var(--border-md);"></div>`;
+    } else if (isOverBudget) {
+      consumedBarHtml = `<div style="width:100%;height:100%;background:#f87171;"
+        title="${esc(fmtCPMoney(totalCost))} cost vs ${esc(fmtCPMoney(budget))} budget — over by ${esc(fmtCPMoney(totalCost - budget))}"></div>`;
+    } else {
+      consumedBarHtml = costRows.filter(r => r.cost > 0).map(r => {
+        // Each employee's segment is their share of COST, scaled down
+        // to fillPct of the whole track — so segments only ever
+        // occupy the "spent so far" portion, not the full bar.
+        const pct = (r.cost / totalCost) * fillPct;
+        return `<div style="width:${pct}%;height:100%;background:${getEmployeeColor(r.empId)};"
+          title="${esc(r.name)}: ${fmtCPMoney(r.cost)}"></div>`;
+      }).join('');
+    }
+
+    barLabelHtml = `<div style="font-size:9px;font-weight:700;margin-bottom:3px;
+        color:${isOverBudget ? '#f87171' : 'var(--txt1)'};">
+        ${!totalCost
+          ? (totalHours > 0 ? `${esc(fmtHM(totalHours))} logged — no Points set` : 'No hours logged yet')
+          : hasBudget
+            ? (isOverBudget
+                ? `${esc(fmtCPMoney(totalCost))} cost — ${esc(fmtCPMoney(totalCost - budget))} over budget`
+                : `${esc(fmtCPMoney(totalCost))} of ${esc(fmtCPMoney(budget))} budget consumed`)
+            : `${esc(fmtCPMoney(totalCost))} cost so far`}
+      </div>`;
+  } else if (isTL) {
+    // Same cost-vs-budget math as Manager, computed silently — but
+    // nothing numeric ever reaches the markup. Single solid green
+    // fill while under budget (no per-employee segmentation, since
+    // that would visually leak each person's relative cost share),
+    // solid red the instant it's over. No tooltip on either state.
+    const { totalCost } = getProjectCostBreakdown(p);
+    const budget = parseFloat(p.projectConstant) || 0;
+    const hasBudget = budget > 0;
+    const isOverBudget = hasBudget && totalCost > budget;
+    const fillPct = hasBudget
+      ? Math.min((totalCost / budget) * 100, 100)
+      : (totalCost > 0 ? 100 : 0);
+
+    if (!totalCost) {
+      consumedBarHtml = `<div style="width:100%;height:100%;background:var(--border-md);"></div>`;
+    } else if (isOverBudget) {
+      consumedBarHtml = `<div style="width:100%;height:100%;background:#f87171;"></div>`;
+    } else {
+      consumedBarHtml = `<div style="width:${fillPct}%;height:100%;background:#34d399;"></div>`;
+    }
+
+    barLabelHtml = `<div style="font-size:9px;font-weight:700;margin-bottom:3px;
+        color:${isOverBudget ? '#f87171' : (totalCost > 0 && hasBudget ? '#34d399' : 'var(--txt1)')};">
+        ${!totalCost
+          ? (totalHours > 0 ? 'No Points set' : 'No hours logged yet')
+          : hasBudget
+            ? (isOverBudget ? 'Over budget' : 'Within budget')
+            : 'No budget set'}
+      </div>`;
+  } else {
+    consumedBarHtml = totalHours > 0
+      ? totals.map(t => {
+          const pct = (t.hours / totalHours) * 100;
+          return `<div style="width:${pct}%;height:100%;background:${getEmployeeColor(t.empId)};"
+            title="${esc(t.name)}: ${fmtHM(t.hours)}"></div>`;
+        }).join('')
+      : `<div style="width:100%;height:100%;background:var(--border-md);"></div>`;
+    barLabelHtml = `<div style="font-size:9px;font-weight:700;color:var(--txt1);margin-bottom:3px;">
+        ${totalHours > 0 ? `${esc(fmtHM(totalHours))} consumed` : 'No hours logged yet'}
+      </div>`;
+  }
 
   // Very simple by design — a scan-list entry, not a dashboard.
   // Timeline/Subtasks/Task Breakdown/Team Performance all still live
@@ -1250,10 +1451,6 @@ function buildProjectCard(p) {
           <div class="cp-metric-box" style="min-width:60px;padding:3px 6px;">
             <div class="cp-metric-label">Start Date</div>
             <div class="cp-metric-val" style="font-size:9px;">${esc(fmtCPDateShort(p.startDate))}</div>
-          </div>
-          <div class="cp-metric-box" style="min-width:60px;padding:3px 6px;">
-            <div class="cp-metric-label">Started By</div>
-            <div class="cp-metric-val" style="font-size:9px;">${esc(p.startedBy || '—')}</div>
           </div>
           <div class="cp-metric-box" style="min-width:60px;padding:3px 6px;">
             <div class="cp-metric-label">${esc(endOrStatusLabel)}</div>
@@ -1355,7 +1552,7 @@ async function openProjectDetail(content, projectId, opts = {}) {
 
   const isNew = !projectId;
   const project = isNew
-    ? { projectId: '', projectName: '', clientId: presetClientId, status: 'In Progress', startDate: '', startedBy: '' }
+    ? { projectId: '', projectName: '', clientId: presetClientId, status: 'In Progress', startDate: '', endDate: '' }
     : CP_PROJECTS.find(p => p.projectId === projectId);
 
   if (!isNew && !project) { toast?.('e', 'Project not found', projectId); return; }
@@ -1415,8 +1612,8 @@ async function openProjectDetail(content, projectId, opts = {}) {
         </div>
 
         <div class="cp-form-field">
-          <label class="cp-flabel">Started By <span class="cp-hint">— view only</span></label>
-          <input class="cp-finput" value="${esc(project.startedBy || '—')}" disabled/>
+          <label class="cp-flabel">End Date</label>
+          <input class="cp-finput" id="cpEndDate" type="date" value="${isoDateOrBlank(project.endDate)}" ${canEdit ? '' : 'disabled'}/>
         </div>
 
         ${isManager ? `
@@ -1452,6 +1649,7 @@ async function openProjectDetail(content, projectId, opts = {}) {
           <div id="cpTimelineSection" style="margin-top:1.25rem;"></div>
         </div>
         <div style="display:flex;flex-direction:column;gap:1.25rem;min-width:0;">
+          ${isManager ? `<div id="cpProfitSection"></div>` : ''}
           <div id="cpTaskSection"></div>
           <div id="cpSubtaskSection"></div>
           <div id="cpMonthlyPerfSection"></div>
@@ -1510,6 +1708,10 @@ async function openProjectDetail(content, projectId, opts = {}) {
   $('cpReportOverall')?.addEventListener('click', () => openProjectReport(project, 'overall'));
 
   if (!isNew) renderProjectTimelineSection(project);
+  if (!isNew && isManager) {
+    await ensureSalaryDataLoaded();
+    renderProjectProfitSection(project);
+  }
   if (!isNew) renderProjectTaskSection(project);
   if (!isNew) renderProjectSubtasksSection(project);
   if (!isNew) renderProjectMonthlyPerfSection(project);
@@ -1569,6 +1771,7 @@ function startProjectDetailAutoRefresh(content, projectId) {
     if (!freshProject) { stopProjectDetailAutoRefresh(); return; } // project deleted elsewhere in the meantime
 
     renderProjectTimelineSection(freshProject);
+    if (CP_ROLE === 'manager') renderProjectProfitSection(freshProject);
     renderProjectTaskSection(freshProject);
     renderProjectSubtasksSection(freshProject);
     renderProjectMonthlyPerfSection(freshProject);
@@ -1631,6 +1834,7 @@ async function saveProjectFromForm(content, isNew, originalProject, onDone) {
   payload.clientId    = clientId;
   payload.status       = $('cpStatus').value;
   payload.startDate    = $('cpStartDate').value;
+  payload.endDate      = $('cpEndDate').value;
   // Project Constant — only present in the form (and thus in this
   // payload) for the Manager role; the backend also independently
   // ignores it from anyone else, so this is belt-and-suspenders, not
@@ -1970,6 +2174,63 @@ function renderProjectTimelineSection(project) {
         details[open] summary .cp-cost-arrow { transform: rotate(90deg); }
         summary::-webkit-details-marker { display:none; }
       </style>
+    </div>`;
+}
+
+// ══════════════════════════════════════════════════════════════
+// PROFIT / LOSS — Manager only. See getProjectCostBreakdown /
+// getMonthlyPointsForEmployee above for how cost is derived. Revenue
+// is simply the Project Constant, per this project's convention.
+// ══════════════════════════════════════════════════════════════
+function fmtCPMoney(n) {
+  const v = Math.round(Number(n) || 0);
+  return v.toLocaleString('en-IN');
+}
+
+function renderProjectProfitSection(project) {
+  const el = $('cpProfitSection');
+  if (!el) return;
+
+  const revenue = parseFloat(project.projectConstant) || 0;
+  const { rows, totalCost, missingPoints } = getProjectCostBreakdown(project);
+  const profit = revenue - totalCost;
+  const isProfit = profit >= 0;
+
+  const rowsHtml = rows.length
+    ? rows.map(r => `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:11.5px;
+          padding:6px 0;border-bottom:1px solid var(--border);">
+          <span style="color:var(--txt1);font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+            white-space:nowrap;" title="${esc(r.name)}">${esc(r.name)}</span>
+          <span style="color:var(--txt2);white-space:nowrap;">${fmtHM(r.hours)}${r.hasPoints ? '' : ' (no Points set)'}</span>
+          <span style="color:var(--txt1);font-weight:700;white-space:nowrap;flex:0 0 auto;">${r.hasPoints ? fmtCPMoney(r.cost) : '—'}</span>
+        </div>`).join('')
+    : `<div style="font-size:12px;color:var(--txt2);">No hours logged yet.</div>`;
+
+  el.innerHTML = `
+    <div class="cp-card">
+      <div style="font-weight:700;font-size:14px;color:var(--txt1);margin-bottom:1rem;">💰 Profit / Loss</div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:1rem;">
+        <div class="cp-metric-box">
+          <div class="cp-metric-label">Revenue (Constant)</div>
+          <div class="cp-metric-val">${fmtCPMoney(revenue)}</div>
+        </div>
+        <div class="cp-metric-box">
+          <div class="cp-metric-label">Cost (hours × rate)</div>
+          <div class="cp-metric-val">${fmtCPMoney(totalCost)}</div>
+        </div>
+      </div>
+
+      <div style="padding:10px 14px;border-radius:8px;margin-bottom:1rem;font-weight:700;font-size:14px;
+        background:${isProfit ? 'rgba(52,211,153,0.12)' : 'rgba(248,113,113,0.12)'};
+        color:${isProfit ? '#34d399' : '#f87171'};">
+        ${isProfit ? '▲ Profit' : '▼ Loss'}: ${fmtCPMoney(Math.abs(profit))}
+      </div>
+
+      <div style="font-size:10px;color:var(--txt2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Cost Breakdown</div>
+      ${rowsHtml}
+      ${missingPoints.length ? `<div style="margin-top:8px;font-size:10.5px;color:var(--txt2);">No Points set for: ${esc(missingPoints.join(', '))} — their hours aren't included in cost.</div>` : ''}
     </div>`;
 }
 
@@ -2838,7 +3099,14 @@ function fmtCPMonthLabel(monthKey) {
 
 function fmtCPDateShort(dateStr) {
   if (!dateStr) return '—';
-  const d = new Date(dateStr + 'T00:00:00');
+  // Same non-ISO text-date issue isoDateOrBlank() handles above (see
+  // its comment) — normalize first so a date typed as DD-MM-YYYY in
+  // the sheet displays correctly here too, instead of silently
+  // falling through to '—' because `new Date('21-08-2026T00:00:00')`
+  // isn't a format the Date constructor understands.
+  const iso = isoDateOrBlank(dateStr);
+  if (!iso) return '—';
+  const d = new Date(iso + 'T00:00:00');
   if (isNaN(d.getTime())) return '—';
   return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 }
