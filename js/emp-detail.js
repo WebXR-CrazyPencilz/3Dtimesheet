@@ -491,6 +491,162 @@ async function loadEmpDetail(fromDate, toDate) {
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+// PROJECTS SECTION (Manager only) — one budget-status card per
+// project this employee has logged hours against, same model as the
+// employee's own My Dashboard (myprojects-tab.js): Project Budget,
+// Total Points Used (whole project, every contributor), Profit/Loss,
+// and this specific employee's own Points Used, plus the green/red/
+// amber budget bar.
+//
+// Deliberately gated to Manager only at the call site in
+// renderEmpDetail — this page is also shared by Team Leader and HR,
+// and TL is restricted everywhere else in the app to a colorless
+// green/red-only signal with NO cost/points figures shown (to
+// protect salary-linked data). Showing exact numbers here would
+// silently break that existing boundary if it ever rendered for TL,
+// so this section is Manager-exclusive by design.
+//
+// Uses Client-Project.js's own already-loaded globals (CP_PROJECTS,
+// CP_CLIENTS, CP_TIMESHEET_DATA) and calculation functions
+// (getProjectCostBreakdown, getMonthlyPointsForEmployee) — those are
+// already populated for the whole Manager portal at manager.js's own
+// init (ClientProjectAPI.ingestMasterData/ingestTimesheetData), so
+// this needs zero additional network requests.
+// ══════════════════════════════════════════════════════════════
+
+function getEmpProjectsList(empId) {
+  const data = typeof CP_TIMESHEET_DATA !== 'undefined' ? CP_TIMESHEET_DATA : [];
+  const projects = typeof CP_PROJECTS !== 'undefined' ? CP_PROJECTS : [];
+  const myProjectNames = new Set(
+    data.filter(e => e.empId === empId && e.status !== 'Leave' && e.project).map(e => e.project)
+  );
+  return projects.filter(p => myProjectNames.has(p.projectName));
+}
+
+function getEmpHoursOnProject(empId, projectName) {
+  const data = typeof CP_TIMESHEET_DATA !== 'undefined' ? CP_TIMESHEET_DATA : [];
+  return data
+    .filter(e => e.empId === empId && e.project === projectName && e.status !== 'Leave')
+    .reduce((s, e) => s + (Number(e.hours) || 0), 0);
+}
+
+// This employee's own cost contribution to one project — their own
+// hours each month × their own Points for that month, summed. Same
+// calculation as myprojects-tab.js's getMyProjectCost, just for
+// whichever employee this detail page is currently showing rather
+// than always the logged-in user.
+function getEmpProjectPoints(empId, empName, project) {
+  const data = typeof CP_TIMESHEET_DATA !== 'undefined' ? CP_TIMESHEET_DATA : [];
+  const byMonth = {};
+  data
+    .filter(e => e.empId === empId && e.project === project.projectName && e.status !== 'Leave' && e.date)
+    .forEach(e => {
+      const month = e.date.slice(0, 7);
+      byMonth[month] = (byMonth[month] || 0) + (Number(e.hours) || 0);
+    });
+
+  let cost = 0;
+  Object.entries(byMonth).forEach(([month, hrs]) => {
+    if (typeof getMonthlyPointsForEmployee === 'function') {
+      cost += hrs * getMonthlyPointsForEmployee(empId, month, empName);
+    }
+  });
+  return cost;
+}
+
+function buildEmpProjectCard(empId, empName, p) {
+  const clients = typeof CP_CLIENTS !== 'undefined' ? CP_CLIENTS : [];
+  const client = clients.find(c => c.id === p.clientId);
+
+  let totalCost = 0;
+  try {
+    if (typeof getProjectCostBreakdown === 'function') totalCost = getProjectCostBreakdown(p).totalCost;
+  } catch (err) {
+    console.warn('[emp-detail] Cost calc failed for', p.projectId, ':', err.message);
+  }
+
+  const budget = parseFloat(p.projectConstant) || 0;
+  const hasBudget = budget > 0;
+  const isOverBudget = hasBudget && totalCost > budget;
+  const fillPct = hasBudget ? Math.min((totalCost / budget) * 100, 100) : (totalCost > 0 ? 100 : 0);
+
+  let barHtml, labelText, labelColor;
+  if (!totalCost) {
+    barHtml = `<div style="width:100%;height:100%;background:var(--border-md);"></div>`;
+    labelText = 'No hours logged yet'; labelColor = 'var(--txt1)';
+  } else if (isOverBudget) {
+    barHtml = `<div style="width:100%;height:100%;background:#f87171;"></div>`;
+    labelText = 'Over budget'; labelColor = '#f87171';
+  } else {
+    barHtml = `<div style="width:${fillPct}%;height:100%;background:#34d399;"></div>`;
+    labelText = hasBudget ? 'Within budget' : 'No budget set'; labelColor = hasBudget ? '#34d399' : 'var(--txt1)';
+  }
+
+  const myHours  = getEmpHoursOnProject(empId, p.projectName);
+  const myPoints = getEmpProjectPoints(empId, empName, p);
+  const profit   = budget - totalCost;
+  const isProfit = profit >= 0;
+  const moneyFmt = typeof fmtCPMoney === 'function' ? fmtCPMoney : (n => Math.round(Number(n) || 0).toLocaleString('en-IN'));
+  const dateFmt  = typeof fmtCPDateShort === 'function' ? fmtCPDateShort : (d => d || '—');
+  const firstName = (empName || '').split(' ')[0] || 'Their';
+
+  return `
+    <div style="background:var(--surface1);border:1px solid var(--border);border-radius:12px;padding:14px;">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:6px;">
+        <div style="min-width:0;">
+          <div style="font-weight:700;font-size:14px;color:var(--txt1);">${esc(p.projectName || p.projectId)}</div>
+          <div style="font-size:11px;color:var(--txt2);">${esc(p.projectId)} · ${esc(client?.name || p.clientId || '—')}</div>
+        </div>
+        <span style="font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:20px;background:rgba(79,142,247,0.12);
+          color:#4f8ef7;white-space:nowrap;">${esc(p.status || 'In Progress')}</span>
+      </div>
+      <div style="font-size:11px;color:var(--txt2);margin-bottom:.4rem;">
+        Start: <strong style="color:var(--txt1);">${esc(dateFmt(p.startDate))}</strong>
+        · End: <strong style="color:var(--txt1);">${esc(dateFmt(p.endDate))}</strong>
+      </div>
+      <div style="font-size:11px;color:var(--txt2);margin-bottom:.5rem;">${esc(firstName)}'s hours: <strong style="color:var(--txt1);">${fmtH(myHours)}</strong></div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:.5rem;font-size:11px;">
+        <div><span style="color:var(--txt2);">Project Budget:</span> <strong style="color:var(--txt1);">${hasBudget ? esc(moneyFmt(budget)) : 'Not set'}</strong></div>
+        <div><span style="color:var(--txt2);">Total Points Used:</span> <strong style="color:var(--txt1);">${esc(moneyFmt(totalCost))}</strong></div>
+        ${hasBudget ? `<div><span style="color:var(--txt2);">${isProfit ? 'Profit Points' : 'Loss Points'}:</span> <strong style="color:${isProfit ? '#34d399' : '#f87171'};">${esc(moneyFmt(Math.abs(profit)))}</strong></div>` : ''}
+        <div><span style="color:var(--txt2);">${esc(firstName)}'s Points Used:</span> <strong style="color:#4f8ef7;">${esc(moneyFmt(myPoints))}</strong></div>
+      </div>
+      <div style="font-size:9px;font-weight:700;margin-bottom:4px;color:${labelColor};">${labelText}</div>
+      <div style="height:6px;background:var(--surface2);border-radius:4px;overflow:hidden;">${barHtml}</div>
+    </div>`;
+}
+
+function buildEmpProjectsSection(empId, empName) {
+  let projects = [];
+  try {
+    projects = getEmpProjectsList(empId);
+  } catch (err) {
+    console.warn('[emp-detail] Failed to build projects list:', err.message);
+  }
+
+  const header = `
+    <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:.6rem;flex-wrap:wrap;">
+      <div style="font-weight:700;font-size:14px;color:var(--txt1);">📁 Projects</div>
+      <div style="font-size:10.5px;color:var(--txt2);">— all-time, not affected by the date range above</div>
+    </div>`;
+
+  if (!projects.length) {
+    return `<div style="background:var(--surface1);border:1px solid var(--border);border-radius:12px;
+      padding:1rem 1.1rem;margin-bottom:1.1rem;">
+      ${header}
+      <div style="font-size:12.5px;color:var(--txt2);">No projects logged yet.</div>
+    </div>`;
+  }
+
+  const cardsHtml = projects.map(p => buildEmpProjectCard(empId, empName, p)).join('');
+  return `<div style="background:var(--surface1);border:1px solid var(--border);border-radius:12px;
+    padding:1rem 1.1rem;margin-bottom:1.1rem;">
+    ${header}
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(360px,100%),1fr));gap:12px;">${cardsHtml}</div>
+  </div>`;
+}
+
 // ── Render detail content ──────────────────────────────────────
 function renderEmpDetail(data) {
   const content = $('empDetailContent');
@@ -523,6 +679,8 @@ function renderEmpDetail(data) {
 
   content.innerHTML = `
     ${statsHtml}
+
+    ${(typeof MANAGER_MODE !== 'undefined' && MANAGER_MODE) ? buildEmpProjectsSection(data.emp.id, data.emp.name) : ''}
 
     <!-- Attendance & Activity (merged: daily status + hours breakdown + resolution) -->
     <div style="background:var(--surface1);border:1px solid var(--border);border-radius:12px;

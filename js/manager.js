@@ -27,10 +27,22 @@
 let MGR_DATA           = [];
 let MGR_EMPLOYEES      = [];
 
-let MGR_TAB            = 'dashboard'; // dashboard|project|employees|salary|... — Dashboard is the default landing tab
+let MGR_TAB            = 'dashboard'; // dashboard|project|employees|timesheet|... — Dashboard is the default landing tab
 let MGR_RANGE          = 'week';
 let MGR_DAY_OFFSET     = 0;
 let MGR_SELECTED_MONTH = '';
+
+// Timesheet tab's own range/filter/page state — deliberately separate
+// from Employees tab's MGR_RANGE/MGR_DAY_OFFSET/MGR_SELECTED_MONTH
+// above, so switching the date range on one tab doesn't silently
+// change what the other tab shows when you navigate back to it.
+let MGR_TS_RANGE          = 'week';
+let MGR_TS_DAY_OFFSET     = 0;
+let MGR_TS_SELECTED_MONTH = '';
+let MGR_TS_EMP_FILTER     = '';
+let MGR_TS_SEARCH         = '';
+let MGR_TS_PAGE           = 0;
+const MGR_TS_PAGE_SIZE    = 10; // dates per page
 
 const MGR_PALETTE = [
   '#4f8ef7','#7c5cfc','#34d399','#fbbf24',
@@ -41,6 +53,7 @@ const MGR_PALETTE = [
 // ── INIT ──────────────────────────────────────────
 async function initManager() {
   MGR_SELECTED_MONTH = todayStr().slice(0,7);
+  MGR_TS_SELECTED_MONTH = todayStr().slice(0,7);
   const container = $('mgrApp');
   if (!container) return;
 
@@ -116,6 +129,7 @@ function renderManagerPortal() {
         { id:'dashboard', icon:'🏠', label:'Dashboard' },
         { id:'project',   icon:'📁', label:'Projects & Clients' },
         { id:'employees', icon:'👥', label:'Employees' },
+        { id:'timesheet', icon:'🕐', label:'Timesheet' },
         { id:'attendance',icon:'🕒', label:'Attendance' },
         { id:'timeline',   icon:'📊', label:'Project Timeline' },
         { id:'salary',    icon:'💼', label:'Salary'    },
@@ -168,6 +182,8 @@ function renderMgrTab() {
   }
 
   if (MGR_TAB === 'employees') { renderEmployeesTab(content); return; }
+
+  if (MGR_TAB === 'timesheet') { renderMgrTimesheetTab(content); return; }
 
   if (MGR_TAB === 'attendance') {
     if (typeof renderAttendanceTab === 'function') renderAttendanceTab(content);
@@ -457,6 +473,252 @@ function buildEmpCard(emp) {
         ${sliderHtml}
       </div>
     </div>`;
+}
+
+// ══════════════════════════════════════════════════
+// TIMESHEET MODULE — every employee's entries, grouped date-wise.
+// Reuses MGR_DATA (already loaded once in initManager, tagged with
+// empId/empName/empTeam on every entry) — no new fetch needed. Own
+// range/filter/page state (MGR_TS_*), independent of the Employees
+// tab's own MGR_RANGE/MGR_DAY_OFFSET/MGR_SELECTED_MONTH.
+// ══════════════════════════════════════════════════
+function getMgrTimesheetFiltered() {
+  const tod = todayStr(), ws = weekStart();
+  let rows;
+  if (MGR_TS_RANGE === 'day15') {
+    const d = getLast15Days()[MGR_TS_DAY_OFFSET];
+    rows = MGR_DATA.filter(e => e.date === d);
+  } else if (MGR_TS_RANGE === 'week') {
+    rows = MGR_DATA.filter(e => e.date >= ws && e.date <= tod);
+  } else if (MGR_TS_RANGE === 'month') {
+    rows = MGR_DATA.filter(e => e.date.startsWith(MGR_TS_SELECTED_MONTH));
+  } else {
+    rows = MGR_DATA.slice(); // 'all'
+  }
+
+  if (MGR_TS_EMP_FILTER) rows = rows.filter(e => e.empId === MGR_TS_EMP_FILTER);
+
+  if (MGR_TS_SEARCH) {
+    const q = MGR_TS_SEARCH.toLowerCase();
+    rows = rows.filter(e =>
+      [e.empName, e.project, e.client, e.task, e.notes].some(v => v && String(v).toLowerCase().includes(q))
+    );
+  }
+
+  return rows;
+}
+
+function renderMgrTimesheetTab(content) {
+  content.innerHTML = `
+    <div class="mgr-controls">
+      <div class="chart-range" id="mgrTsRange">
+        <button class="rbtn${MGR_TS_RANGE==='day15'?' active':''}"  data-range="day15">15 Days</button>
+        <button class="rbtn${MGR_TS_RANGE==='week'?' active':''}"   data-range="week">This Week</button>
+        <button class="rbtn${MGR_TS_RANGE==='month'?' active':''}"  data-range="month">This Month</button>
+        <button class="rbtn${MGR_TS_RANGE==='all'?' active':''}"    data-range="all">All Time</button>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <select id="mgrTsEmpFilter" class="filt">
+          <option value="">All Employees</option>
+          ${MGR_EMPLOYEES.map(emp => `<option value="${esc(emp.id)}" ${MGR_TS_EMP_FILTER===emp.id?'selected':''}>${esc(emp.name)}</option>`).join('')}
+        </select>
+        <input type="search" id="mgrTsSearch" class="srch" placeholder="Search project, notes…" value="${esc(MGR_TS_SEARCH)}"/>
+      </div>
+    </div>
+
+    <div id="mgrTsDayScroll" style="display:${MGR_TS_RANGE==='day15'?'flex':'none'};
+      gap:6px;margin-bottom:1rem;overflow-x:auto;padding-bottom:4px;"></div>
+
+    <div id="mgrTsMonthPicker" style="display:${MGR_TS_RANGE==='month'?'flex':'none'};
+      gap:8px;margin-bottom:1rem;overflow-x:auto;padding-bottom:4px;"></div>
+
+    <div id="mgrTsContent"></div>
+  `;
+
+  $('mgrTsRange').addEventListener('click', e => {
+    const btn = e.target.closest('.rbtn');
+    if (!btn) return;
+    MGR_TS_RANGE = btn.dataset.range;
+    MGR_TS_DAY_OFFSET = 0;
+    MGR_TS_PAGE = 0;
+    $('mgrTsRange').querySelectorAll('.rbtn').forEach(b => b.classList.toggle('active', b===btn));
+    $('mgrTsDayScroll').style.display   = MGR_TS_RANGE === 'day15' ? 'flex' : 'none';
+    $('mgrTsMonthPicker').style.display = MGR_TS_RANGE === 'month' ? 'flex' : 'none';
+    if (MGR_TS_RANGE === 'day15') buildMgrTsDayScrollBar();
+    if (MGR_TS_RANGE === 'month') buildMgrTsMonthPicker();
+    renderMgrTsContent();
+  });
+
+  $('mgrTsEmpFilter').addEventListener('change', e => {
+    MGR_TS_EMP_FILTER = e.target.value;
+    MGR_TS_PAGE = 0;
+    renderMgrTsContent();
+  });
+
+  $('mgrTsSearch').addEventListener('input', e => {
+    MGR_TS_SEARCH = e.target.value;
+    MGR_TS_PAGE = 0;
+    renderMgrTsContent();
+  });
+
+  if (MGR_TS_RANGE === 'day15') buildMgrTsDayScrollBar();
+  if (MGR_TS_RANGE === 'month') buildMgrTsMonthPicker();
+  renderMgrTsContent();
+}
+
+function buildMgrTsDayScrollBar() {
+  const bar = $('mgrTsDayScroll'); if (!bar) return;
+  const days = getLast15Days();
+  bar.innerHTML = days.map((d,i) => {
+    const isActive  = i===MGR_TS_DAY_OFFSET;
+    const isWeekend = new Date(d+'T00:00:00').getDay()%6===0;
+    return `<button data-offset="${i}" style="flex-shrink:0;padding:5px 14px;border-radius:20px;
+      border:1px solid ${isActive?'var(--a1)':'var(--border)'};
+      background:${isActive?'var(--a1)':'var(--surface2)'};
+      color:${isActive?'#fff':isWeekend?'#a78bfa':'var(--txt1)'};
+      font-size:11px;cursor:pointer;white-space:nowrap;">${fmtDateShort(d)}</button>`;
+  }).join('');
+  bar.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      MGR_TS_DAY_OFFSET = parseInt(btn.dataset.offset);
+      MGR_TS_PAGE = 0;
+      buildMgrTsDayScrollBar();
+      renderMgrTsContent();
+    });
+  });
+}
+
+function buildMgrTsMonthPicker() {
+  const picker = $('mgrTsMonthPicker'); if (!picker) return;
+  const months = [];
+  const now = new Date();
+  for (let i=0;i<12;i++){
+    const d=new Date(now.getFullYear(),now.getMonth()-i,1);
+    months.push({val:toLocalDateStr(d).slice(0,7),label:d.toLocaleDateString('en-IN',{month:'short',year:'numeric'})});
+  }
+  picker.innerHTML = `
+    <div style="display:flex;gap:6px;overflow-x:auto;flex:1;padding-bottom:2px;">
+      ${months.map(m=>`<button data-month="${m.val}" style="flex-shrink:0;padding:5px 14px;border-radius:20px;
+        border:1px solid ${m.val===MGR_TS_SELECTED_MONTH?'var(--a1)':'var(--border)'};
+        background:${m.val===MGR_TS_SELECTED_MONTH?'var(--a1)':'var(--surface2)'};
+        color:${m.val===MGR_TS_SELECTED_MONTH?'#fff':'var(--txt1)'};
+        font-size:11px;cursor:pointer;white-space:nowrap;">${m.label}</button>`).join('')}
+    </div>`;
+  picker.querySelectorAll('button[data-month]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      MGR_TS_SELECTED_MONTH = btn.dataset.month;
+      MGR_TS_PAGE = 0;
+      buildMgrTsMonthPicker();
+      renderMgrTsContent();
+    });
+  });
+}
+
+function renderMgrTsContent() {
+  const content = $('mgrTsContent');
+  if (!content) return;
+
+  const rows = getMgrTimesheetFiltered();
+
+  const byDate = {};
+  rows.forEach(e => {
+    if (!e.date) return;
+    if (!byDate[e.date]) byDate[e.date] = [];
+    byDate[e.date].push(e);
+  });
+  const dates = Object.keys(byDate).sort((a,b) => b.localeCompare(a)); // most recent first
+
+  if (!dates.length) {
+    content.innerHTML = `<div class="chart-empty">No timesheet entries for this range.</div>`;
+    return;
+  }
+
+  const totalPages = Math.max(1, Math.ceil(dates.length / MGR_TS_PAGE_SIZE));
+  if (MGR_TS_PAGE >= totalPages) MGR_TS_PAGE = totalPages - 1;
+  const pageDates = dates.slice(MGR_TS_PAGE * MGR_TS_PAGE_SIZE, (MGR_TS_PAGE + 1) * MGR_TS_PAGE_SIZE);
+
+  content.innerHTML = `
+    <div class="card" style="padding:1.25rem;">
+      ${pageDates.map(d => buildMgrTsDateSection(d, byDate[d])).join('')}
+    </div>
+    <div id="mgrTsPager" style="margin-top:1rem;"></div>
+  `;
+
+  renderMgrTsPager(totalPages);
+}
+
+// One date's section — a header (date, employee count, total hours)
+// followed by one block per employee who logged anything that day,
+// each showing every entry they made (project/status, hours, notes).
+function buildMgrTsDateSection(dateStr, entries) {
+  const dateLabel = new Date(dateStr+'T00:00:00').toLocaleDateString('en-IN',
+    { weekday:'long', day:'numeric', month:'short', year:'numeric' });
+  const totalHours = calcHours(entries);
+  const empCount = new Set(entries.map(e => e.empId)).size;
+
+  const byEmp = {};
+  entries.forEach(e => {
+    if (!byEmp[e.empId]) byEmp[e.empId] = { empName: e.empName || e.empId, rows: [] };
+    byEmp[e.empId].rows.push(e);
+  });
+  const empIds = Object.keys(byEmp).sort((a,b) => byEmp[a].empName.localeCompare(byEmp[b].empName));
+
+  const rowsHtml = empIds.map(empId => {
+    const { empName, rows } = byEmp[empId];
+    const empHours = calcHours(rows);
+
+    const entryRows = rows.map(e => {
+      const isLeave   = e.status === 'Leave';
+      const isHoliday = e.status === 'Holiday';
+      const projectLabel = isLeave ? '🏖️ Leave' : isHoliday ? '🎉 Holiday' : esc(e.project || '—');
+      return `
+        <div style="display:flex;align-items:center;gap:10px;padding:4px 0;font-size:12px;flex-wrap:wrap;">
+          <span style="flex:0 0 170px;color:var(--txt1);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${projectLabel}</span>
+          <span style="flex:0 0 70px;color:var(--txt2);text-align:right;">${(isLeave||isHoliday) ? '—' : fh(parseH(e.hours))}</span>
+          <span style="flex:1;min-width:0;color:var(--txt2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(e.notes||'')}">${e.notes ? esc(e.notes) : ''}</span>
+        </div>`;
+    }).join('');
+
+    return `
+      <div style="padding:10px 0;border-bottom:1px solid var(--border);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+          <span style="font-size:13px;font-weight:700;color:var(--txt1);">${esc(empName)}</span>
+          <span style="font-size:12px;font-weight:700;color:var(--a1);">${fh(empHours)}</span>
+        </div>
+        ${entryRows}
+      </div>`;
+  }).join('');
+
+  return `
+    <div style="margin-bottom:1.5rem;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding-bottom:8px;border-bottom:2px solid var(--border-md);">
+        <span style="font-size:14px;font-weight:800;color:var(--txt1);">${esc(dateLabel)}</span>
+        <span style="font-size:12px;color:var(--txt2);">${empCount} employee${empCount!==1?'s':''} · ${fh(totalHours)} total</span>
+      </div>
+      ${rowsHtml}
+    </div>`;
+}
+
+function renderMgrTsPager(totalPages) {
+  const pagerEl = $('mgrTsPager');
+  if (!pagerEl) return;
+  if (totalPages <= 1) { pagerEl.innerHTML = ''; return; }
+
+  const pageNums = [];
+  for (let p = 0; p < totalPages; p++) pageNums.push(p);
+
+  pagerEl.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap;">
+      <button class="pbtn" id="mgrTsPagePrev" ${MGR_TS_PAGE===0?'disabled':''}>‹ Prev</button>
+      ${pageNums.map(p => `<button class="pbtn${p===MGR_TS_PAGE?' cur':''}" data-page="${p}">${p+1}</button>`).join('')}
+      <button class="pbtn" id="mgrTsPageNext" ${MGR_TS_PAGE===totalPages-1?'disabled':''}>Next ›</button>
+    </div>`;
+
+  $('mgrTsPagePrev')?.addEventListener('click', () => { if (MGR_TS_PAGE>0) { MGR_TS_PAGE--; renderMgrTsContent(); } });
+  $('mgrTsPageNext')?.addEventListener('click', () => { if (MGR_TS_PAGE<totalPages-1) { MGR_TS_PAGE++; renderMgrTsContent(); } });
+  pagerEl.querySelectorAll('.pbtn[data-page]').forEach(btn => {
+    btn.addEventListener('click', () => { MGR_TS_PAGE = parseInt(btn.dataset.page, 10); renderMgrTsContent(); });
+  });
 }
 
 // ══════════════════════════════════════════════════
