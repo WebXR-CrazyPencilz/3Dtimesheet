@@ -489,6 +489,12 @@ tr:hover .del-btn{opacity:1}
 @media(max-width:640px){
   .main{padding:1.1rem .9rem}.bar{padding:0 .9rem}
   #mgrPortal .main,#tlPortal .main,#hrPortal .main{padding:1.1rem .9rem}
+  /* Employee portal specifically gets a smaller side gap on mobile —
+     .9rem on both sides was leaving visible empty margin next to the
+     tab bar and every card underneath it that wasn't really buying
+     anything on an already-narrow screen. */
+  #app .main{padding-left:.5rem;padding-right:.5rem}
+  #app .bar{padding-left:.6rem;padding-right:.6rem}
   /* My Dashboard's project cards are now minimal (icon, name, one
      status line — no dense figures), so a 2-column grid reads cleanly
      on a phone instead of needing to collapse to one column. */
