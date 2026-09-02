@@ -547,11 +547,19 @@ function buildEmpDashboardCard(p, opts = {}) {
       </div>
       <span class="cp-status-pill" style="background:rgba(79,142,247,0.12);color:#4f8ef7;flex-shrink:0;">${esc(p.status || 'In Progress')}</span>`;
 
+  const datesHtml = opts.unmatched
+    ? ''
+    : `<div style="font-size:11px;color:var(--muted);margin-bottom:.4rem;">
+        Start: <strong style="color:var(--txt1);">${esc(fmtCPDateShort(p.startDate))}</strong>
+        · End: <strong style="color:var(--txt1);">${esc(fmtCPDateShort(p.endDate))}</strong>
+      </div>`;
+
   return `
     <div class="cp-entity-card">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:.6rem;flex-wrap:wrap;">
         ${headerHtml}
       </div>
+      ${datesHtml}
       <div style="font-size:11px;color:var(--muted);margin-bottom:.6rem;">Your hours on this project: <strong>${esc(fh(myHours))}</strong></div>
       ${totalsHtml}
       <div style="font-size:9px;font-weight:700;margin-bottom:4px;color:${labelColor};">${labelText}</div>
