@@ -176,20 +176,16 @@ function getMyUnmatchedProjectNames() {
 }
 
 function buildEmpUnmatchedProjectCard(name) {
-  const relevant = EMP_DASH_FULL_HISTORY.filter(e => e.project === name && e.status !== 'Leave');
-  const hours = relevant.reduce((s, e) => s + Number(e.hours || 0), 0);
-  const days = new Set(relevant.map(e => e.date)).size;
-
-  return `
-    <div class="cp-entity-card">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:.4rem;flex-wrap:wrap;">
-        <div class="cp-entity-name" style="font-size:14px;">${esc(name)}
-          <span style="font-size:9.5px;font-weight:700;color:var(--txt2);background:var(--surface2,#20242e);
-            border-radius:8px;padding:1px 6px;margin-left:4px;vertical-align:middle;">No project record</span>
-        </div>
-      </div>
-      <div style="font-size:11px;color:var(--muted);">Your hours: <strong>${esc(fh(hours))}</strong> across ${days} day${days !== 1 ? 's' : ''}</div>
-    </div>`;
+  // No real Project Master row exists for this name, so there's no
+  // clientId/status/Constant to draw from — but getProjectCostBreakdown
+  // and getMyProjectCost only need a projectName to match Timesheet
+  // entries against, so cost/Your Cost still work fine. Building a
+  // minimal synthetic project object and reusing buildEmpDashboardCard
+  // directly means this gets the EXACT same bar behavior as a real
+  // project with no budget set (a full green bar), instead of no bar
+  // at all — and the same Cost/Your Cost figures.
+  const pseudoProject = { projectId: '', projectName: name, clientId: '', status: '', projectConstant: 0 };
+  return buildEmpDashboardCard(pseudoProject, { unmatched: true });
 }
 
 // ── RENDER ────────────────────────────────────────────────────
@@ -243,6 +239,10 @@ async function renderMyDashboardTab() {
     : `<div class="chart-empty">You haven't logged hours on any project yet.</div>`;
 
   container.innerHTML = statsHtml + projectsHtml;
+
+  container.querySelectorAll('.emp-proj-view-btn').forEach(btn => {
+    btn.addEventListener('click', () => openEmpProjectDetailModal(btn.dataset.project));
+  });
 
   $('empDashAnchorDate')?.addEventListener('change', e => {
     EMP_DASH_ANCHOR_DATE = e.target.value || todayStr();
@@ -478,7 +478,7 @@ function getMyProjectCost(p) {
   return cost;
 }
 
-function buildEmpDashboardCard(p) {
+function buildEmpDashboardCard(p, opts = {}) {
   const client = CP_CLIENTS.find(c => c.id === p.clientId);
 
   let totalCost = 0;
@@ -536,20 +536,74 @@ function buildEmpDashboardCard(p) {
       <div><span style="color:var(--muted);">Your Cost:</span> <strong style="color:#4f8ef7;">${esc(moneyFmt(myCost))}</strong></div>
     </div>`;
 
+  const headerHtml = opts.unmatched
+    ? `<div class="cp-entity-name" style="font-size:14px;">${esc(p.projectName)}
+        <span style="font-size:9.5px;font-weight:700;color:var(--txt2);background:var(--surface2,#20242e);
+          border-radius:8px;padding:1px 6px;margin-left:4px;vertical-align:middle;">No project record</span>
+      </div>`
+    : `<div style="min-width:0;">
+        <div class="cp-entity-name" style="font-size:14px;">${esc(p.projectName || p.projectId)}</div>
+        <div class="cp-entity-id">${esc(p.projectId)} · ${esc(client?.name || p.clientId || '—')}</div>
+      </div>
+      <span class="cp-status-pill" style="background:rgba(79,142,247,0.12);color:#4f8ef7;flex-shrink:0;">${esc(p.status || 'In Progress')}</span>`;
+
   return `
     <div class="cp-entity-card">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:.6rem;flex-wrap:wrap;">
-        <div style="min-width:0;">
-          <div class="cp-entity-name" style="font-size:14px;">${esc(p.projectName || p.projectId)}</div>
-          <div class="cp-entity-id">${esc(p.projectId)} · ${esc(client?.name || p.clientId || '—')}</div>
-        </div>
-        <span class="cp-status-pill" style="background:rgba(79,142,247,0.12);color:#4f8ef7;flex-shrink:0;">${esc(p.status || 'In Progress')}</span>
+        ${headerHtml}
       </div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:.6rem;">Your hours on this project: <strong>${esc(fh(myHours))}</strong></div>
       ${totalsHtml}
       <div style="font-size:9px;font-weight:700;margin-bottom:4px;color:${labelColor};">${labelText}</div>
       <div style="height:6px;background:var(--surface2,#20242e);border-radius:4px;overflow:hidden;">${barHtml}</div>
+      <button class="cp-view-btn emp-proj-view-btn" data-project="${esc(p.projectName)}" style="margin-top:10px;">View Details →</button>
     </div>`;
+}
+
+// Day-by-day log for ONE project, this employee's own entries only —
+// date, hours, task, and notes. Reuses .cp-modal-overlay/.cp-modal
+// (injected by ensureCPStyles, already called before this can be
+// reached) so it looks consistent with the rest of the app's modals.
+function openEmpProjectDetailModal(projectName) {
+  const entries = EMP_DASH_FULL_HISTORY
+    .filter(e => e.project === projectName && e.status !== 'Leave' && e.date)
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  const totalHours = entries.reduce((s, e) => s + Number(e.hours || 0), 0);
+
+  const rowsHtml = entries.length
+    ? entries.map(e => {
+        const dateLabel = new Date(e.date + 'T00:00:00').toLocaleDateString('en-IN',
+          { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+        return `
+          <div style="padding:9px 0;border-bottom:1px solid var(--border);">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+              <span style="font-size:12.5px;font-weight:700;color:var(--txt1);">${esc(dateLabel)}</span>
+              <span style="font-size:12.5px;font-weight:700;color:var(--a1);white-space:nowrap;">${esc(fh(e.hours))}</span>
+            </div>
+            ${e.task ? `<div style="font-size:11px;color:var(--txt2,var(--muted));margin-top:3px;"><span class="tpill">${esc(e.task)}</span></div>` : ''}
+            <div style="font-size:11px;color:${e.notes ? 'var(--txt2,var(--muted))' : 'var(--muted)'};margin-top:3px;${e.notes ? '' : 'font-style:italic;'}">
+              ${e.notes ? '📝 ' + esc(e.notes) : 'No notes'}
+            </div>
+          </div>`;
+      }).join('')
+    : `<div style="font-size:12px;color:var(--txt2,var(--muted));padding:12px 0;">No entries found for this project.</div>`;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'cp-modal-overlay';
+  overlay.innerHTML = `
+    <div class="cp-modal" style="width:420px;">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:4px;">
+        <div style="font-weight:700;font-size:15px;color:var(--txt1);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(projectName)}</div>
+        <button id="empProjDetailClose" class="cp-icon-btn" title="Close" style="flex-shrink:0;">✕</button>
+      </div>
+      <div style="font-size:11px;color:var(--txt2,var(--muted));margin-bottom:10px;">${entries.length} entr${entries.length !== 1 ? 'ies' : 'y'} · ${esc(fh(totalHours))} total</div>
+      <div style="max-height:60vh;overflow-y:auto;">${rowsHtml}</div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  overlay.querySelector('#empProjDetailClose').addEventListener('click', () => overlay.remove());
 }
 
 // ══════════════════════════════════════════════════════════════
