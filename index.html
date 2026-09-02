@@ -544,6 +544,16 @@ tr:hover .del-btn{opacity:1}
   .mgr-view-tabs{width:100%}
   .mvtab{flex:1;text-align:center}
 
+  /* Employee portal's My Dashboard / Timesheet / My Attendance tab
+     bar — fixed padding + no shrink meant three tabs simply ran off
+     the right edge of a phone screen instead of fitting. Same
+     equal-share pattern as .mgr-view-tabs/.mvtab above: each tab
+     takes exactly 1/3 of the full width, so all three are always
+     visible without any horizontal scrolling. */
+  #empTabs{width:100%}
+  .emp-tab-btn{flex:1;text-align:center;padding:8px 4px!important;
+    font-size:11px!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+
   /* Safety net: iOS Safari auto-zooms the whole page in when a
      focused input/select/textarea has font-size under 16px, then
      the person has to manually zoom back out — this is almost
