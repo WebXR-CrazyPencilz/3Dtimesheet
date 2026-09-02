@@ -252,7 +252,23 @@ input,select,textarea{-webkit-appearance:none;appearance:none}
 
 /* main */
 .main{margin-top:var(--bar);padding:1.75rem 1.5rem;max-width:960px;margin-left:auto;margin-right:auto;width:100%}
+/* Manager & Team Leader portals get a much wider cap so PC screens
+   use the available space instead of sitting in a narrow centered
+   column. This has no effect on mobile — .main is already width:100%,
+   so on any screen narrower than the cap, the cap simply never
+   engages; the real responsive behavior still comes from the
+   @media(max-width:640px) block below and from the card grids'
+   own auto-fill columns collapsing naturally as the viewport shrinks.
+   The Employee (worker) portal keeps the original 960px — it's a
+   single-column timesheet view, not a dashboard, and was never part
+   of this widening. HR Portal joins Manager/Team Leader here since
+   it's also a dashboard-style shell, not a single-column view. */
 #mgrPortal .main,#tlPortal .main{max-width:1680px;padding:1.75rem 2.5rem}
+/* HR Portal has no width cap at all — the Attendance grid in
+   particular (many day-columns side by side) benefits from using
+   every available pixel on a wide monitor rather than being capped
+   like Manager/TL's card-grid dashboards, which reflow fine at
+   1680px. */
 #hrPortal .main{max-width:none;width:100%;padding:1.75rem 2.5rem}
 .phdr{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-bottom:1.4rem;flex-wrap:wrap}
 .ptitle{font-family:var(--fd);font-size:1.55rem;font-weight:700;letter-spacing:-.03em}
@@ -505,14 +521,24 @@ tr:hover .del-btn{opacity:1}
   .mgr-view-tabs{width:100%}
   .mvtab{flex:1;text-align:center}
 
+  /* Safety net: iOS Safari auto-zooms the whole page in when a
+     focused input/select/textarea has font-size under 16px, then
+     the person has to manually zoom back out — this is almost
+     certainly the actual cause of "zoom in/zoom out" on mobile. The
+     rules above already fix the specific classes; this catches
+     anything else (present or future) with the same problem. */
   input,select,textarea{font-size:16px!important}
 
+  /* History table -> stacked cards. No horizontal scroll, no zoom
+     needed to read a row — each entry becomes its own card with
+     label:value rows instead of table columns. data-label attributes
+     are added per-<td> in table.js's row template. */
   .twrap{overflow-x:visible}
   #htbl thead{display:none}
   #htbl, #htbl tbody{display:block;width:100%}
   #htbl tr{display:block;margin-bottom:.75rem;border:1px solid var(--border);
     border-radius:var(--r12);overflow:hidden;background:var(--surface)}
-  #htbl tr.totrow{display:none}
+  #htbl tr.totrow{display:none} /* totals are already shown in the stats strip above */
   #htbl td{display:flex;align-items:center;justify-content:space-between;gap:.75rem;
     padding:.6rem .85rem;border-right:none;border-bottom:1px solid var(--border);
     white-space:normal;text-align:right}
@@ -621,9 +647,6 @@ tr:hover .del-btn{opacity:1}
         <svg id="asun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
         <svg id="amoon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
       </button>
-      <button class="ibtn" id="chgpw" aria-label="Change password" title="Change password">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-      </button>
       <button class="signout" id="so">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
         <span>Sign Out</span>
@@ -632,15 +655,15 @@ tr:hover .del-btn{opacity:1}
   </header>
   <main class="main">
     <div class="emp-tabs" id="empTabs" style="display:flex;gap:4px;margin-bottom:1.25rem;border-bottom:1px solid var(--border);padding-bottom:0;">
-      <button class="emp-tab-btn active" data-emp-tab="timesheet" style="padding:9px 16px;border:none;background:none;cursor:pointer;
-        font-size:13px;font-weight:600;color:var(--a1);border-bottom:2px solid var(--a1);margin-bottom:-1px;transition:all .2s;">🕐 Timesheet</button>
-      <button class="emp-tab-btn" data-emp-tab="projects" style="padding:9px 16px;border:none;background:none;cursor:pointer;
-        font-size:13px;font-weight:600;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .2s;">📁 My Projects</button>
+      <button class="emp-tab-btn active" data-emp-tab="projects" style="padding:9px 16px;border:none;background:none;cursor:pointer;
+        font-size:13px;font-weight:600;color:var(--a1);border-bottom:2px solid var(--a1);margin-bottom:-1px;transition:all .2s;">🏠 My Dashboard</button>
+      <button class="emp-tab-btn" data-emp-tab="timesheet" style="padding:9px 16px;border:none;background:none;cursor:pointer;
+        font-size:13px;font-weight:600;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .2s;">🕐 Timesheet</button>
       <button class="emp-tab-btn" data-emp-tab="attendance" style="padding:9px 16px;border:none;background:none;cursor:pointer;
         font-size:13px;font-weight:600;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .2s;">📆 My Attendance</button>
     </div>
 
-    <div id="empTabTimesheet">
+    <div id="empTabTimesheet" style="display:none;">
     <div class="phdr">
       <div>
         <h1 class="ptitle">Log Your Time</h1>
@@ -653,19 +676,6 @@ tr:hover .del-btn{opacity:1}
       <div class="sitem"><span class="slbl">This Week</span><span class="sval" id="s1">0h</span></div>
       <div class="sitem"><span class="slbl">This Month</span><span class="sval" id="s2">0h</span></div>
       <div class="sitem"><span class="slbl">Days Logged</span><span class="sval" id="s3">0 days</span></div>
-    </div>
-    <div class="card chart-card" id="chartCard">
-      <div class="chart-hdr">
-        <span class="ttitle">Hours by Project</span>
-        <div class="chart-range" id="chartRange">
-          <button class="rbtn active" data-range="today">Today</button>
-          <button class="rbtn" data-range="week">This Week</button>
-          <button class="rbtn" data-range="month">This Month</button>
-        </div>
-      </div>
-      <div class="chart-body" id="chartBody">
-        <div class="chart-empty">No data yet for this range.</div>
-      </div>
     </div>
     <div class="date-nav-wrap">
       <div class="date-nav" id="dateNav"></div>
@@ -721,11 +731,11 @@ tr:hover .del-btn{opacity:1}
     </div>
     </div>
 
-    <div id="empTabProjects" style="display:none;">
+    <div id="empTabProjects">
       <div class="phdr">
         <div>
-          <h1 class="ptitle">My Projects</h1>
-          <p class="psub">Every project you've worked on, with basic details.</p>
+          <h1 class="ptitle">My Dashboard</h1>
+          <p class="psub">Every project you've worked on, with budget status at a glance.</p>
         </div>
       </div>
       <div id="myProjCardsContainer">
@@ -890,34 +900,33 @@ tr:hover .del-btn{opacity:1}
 <div class="tbox" id="tbox" aria-live="assertive"></div>
 
 <!-- ═══ JS MODULES ══════════════════════════════════════════════ -->
-<script src="js/config.js?v=2026082501"></script>
-<script src="js/data.js?v=2026082501"></script>
-<script src="js/utils.js?v=2026082501"></script>
-<script src="js/api.js?v=2026082501"></script>
-<script src="js/auth.js?v=2026082501"></script>
-<script src="js/form.js?v=2026082501"></script>
-<script src="js/chart.js?v=2026082501"></script>
-<script src="js/myprojects-tab.js?v=2026082501"></script>
-<script src="js/table.js?v=2026082501"></script>
-<script src="js/celebration.js?v=2026082501"></script>
-<script src="js/manager.js?v=2026082501"></script>
-<script src="js/emp-detail.js?v=2026082501"></script>
-<script src="js/teamleader.js?v=2026082501"></script>
-<script src="js/forceentry.js?v=2026082501"></script>
-<script src="js/salary.js?v=2026082501"></script>
-<script src="js/Client-Project.js?v=2026082501"></script>
-<script src="js/Client-Project-Attendance.js?v=2026082501"></script>
-<script src="js/historical-import.js?v=2026082501"></script>
-<script src="js/gantt.js?v=2026082501"></script>
-<script src="js/dashboard.js?v=2026082501"></script>
-<script src="js/humanresource.js?v=2026082501"></script>
+<script src="js/config.js?v=2026081203"></script>
+<script src="js/data.js?v=2026081203"></script>
+<script src="js/utils.js?v=2026081203"></script>
+<script src="js/api.js?v=2026081203"></script>
+<script src="js/auth.js?v=2026081203"></script>
+<script src="js/form.js?v=2026081203"></script>
+<script src="js/chart.js?v=2026081203"></script>
+<script src="js/myprojects-tab.js?v=2026081203"></script>
+<script src="js/table.js?v=2026081203"></script>
+<script src="js/celebration.js?v=2026081203"></script>
+<script src="js/manager.js?v=2026081203"></script>
+<script src="js/emp-detail.js?v=2026081203"></script>
+<script src="js/teamleader.js?v=2026081203"></script>
+<script src="js/forceentry.js?v=2026081203"></script>
+<script src="js/salary.js?v=2026081203"></script>
+<script src="js/Client-Project.js?v=2026081203"></script>
+<script src="js/Client-Project-Attendance.js?v=2026081203"></script>
+<script src="js/historical-import.js?v=2026081203"></script>
+<script src="js/gantt.js?v=2026081203"></script>
+<script src="js/dashboard.js?v=2026081203"></script>
+<script src="js/humanresource.js?v=2026081203"></script>
 <script>
   // ── Boot ──────────────────────────────────────
   setTheme(getTheme());
   $('lthm').onclick  = togTheme;
   $('athm').onclick  = togTheme;
   $('so').onclick    = logout;
-  $('chgpw').onclick = openChangePasswordModal;
 
   // Date badges
   const dateStr = new Date().toLocaleDateString('en-IN',
@@ -929,7 +938,6 @@ tr:hover .del-btn{opacity:1}
 
   // Init modules
   initTable();
-  initChart();
   initLogin();
   initMyProjectsTab();
 </script>

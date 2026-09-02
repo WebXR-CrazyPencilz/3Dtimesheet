@@ -1,921 +1,702 @@
-// ═══════════════════════════════════════════════════
-// MYPROJECTS-TAB.JS — "My Projects" tab, employee's own portal.
+// ═══════════════════════════════════════════════════════════════
+// MYPROJECTS-TAB.JS — Employee Portal "My Dashboard" tab
 //
-// Cards only, per spec — one card per project this employee has
-// worked on, showing:
-//   1. Project Name and ID
-//   2. Start Date / End Date
-//   3. Manager Note / Team Leader Note
-//   4. This employee's own Days worked / Hours worked on it
+// Wires up the emp-tab-btn buttons (index.html scaffolded these
+// with data-emp-tab attributes but nothing ever handled the click —
+// this file is that missing piece) and renders "My Dashboard": every
+// project the logged-in employee has personally logged hours
+// against, each shown as a card with a budget-status bar.
 //
-// Detail drill-down ("View Details") shows day-by-day notes, a
-// month-by-month summary, a task-by-task time breakdown, and two
-// report downloads (This Month / Overall).
+// The bar is deliberately the SAME model as the Team Leader view in
+// Client-Project.js: total project cost (every contributor's hours ×
+// their own Points that month, summed) compared against the
+// project's Constant. Green while under, solid red once over — no
+// revenue, no cost figures, no per-teammate breakdown. An employee
+// never sees a number here, only the color, exactly like a Team
+// Leader.
 //
-// Data sources:
-//   - Project master fields (Name/ID/dates/notes) via the existing
-//     'getProjectMasterList' action, called with role:'employee' —
-//     Code.gs now strips Project Constant/Value for any role other
-//     than 'manager' (deny-by-default), so this is safe to call from
-//     here without any risk of leaking financial data.
-//   - This employee's own all-time history via apiGetAllHistory,
-//     reusing chart.js's MY_PROJECTS_CACHE if it's already been
-//     populated (avoids a duplicate fetch).
-// ═══════════════════════════════════════════════════
+// This file reuses Client-Project.js's pure calculation functions
+// (getProjectCostBreakdown, getMonthlyPointsForEmployee,
+// ensureSalaryDataLoaded) directly — that script loads on every
+// portal already, not just Manager/Team Leader. To do this safely,
+// this file populates Client-Project.js's own data globals
+// (CP_PROJECTS, CP_CLIENTS, CP_EMPLOYEES, CP_TIMESHEET_DATA,
+// CP_HISTORICAL_DATA) itself, but NEVER sets CP_ROLE to 'manager' or
+// 'tl' — so none of that file's edit/delete/save UI paths, which key
+// off CP_ROLE, can ever be reached from here. Only its calculation
+// helpers are used.
+// ═══════════════════════════════════════════════════════════════
 
-let MYPROJ_MASTER_CACHE = null;
+let EMP_DASHBOARD_DATA_LOADED = false;
+let EMP_DASH_ANCHOR_DATE = todayStr(); // end date for the "Last 5 Days" section, adjustable via its date picker
+let EMP_DASHBOARD_RENDERED_FOR = null; // USER.id this was already rendered for, so it fires exactly once per login
+let EMP_ATTEND_RANGE = 'last15'; // 'last15' | 'month' — My Attendance tab's selected range
+let EMP_ATTEND_MONTH = todayStr().slice(0, 7); // 'YYYY-MM' — used only when EMP_ATTEND_RANGE === 'month'
 
-function initMyProjectsTab() {
-  const tabsBar = document.getElementById('empTabs');
-  if (!tabsBar) return;
+// ENTRIES (loaded by auth.js at login) is capped to the last 10 days
+// by the backend (see Code.gs getHistory) — fine for the Timesheet
+// tab it was built for, but wrong for "all time" project totals and
+// for My Attendance, both of which need this employee's FULL history.
+// Loaded once via the uncapped getAllHistory action and cached.
+let EMP_DASH_FULL_HISTORY = [];
+let EMP_DASH_FULL_HISTORY_LOADED = false;
 
-  tabsBar.querySelectorAll('.emp-tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const tab = btn.dataset.empTab;
-
-      tabsBar.querySelectorAll('.emp-tab-btn').forEach(b => {
-        const active = b === btn;
-        b.style.color        = active ? 'var(--a1)' : 'var(--muted)';
-        b.style.borderBottom = active ? '2px solid var(--a1)' : '2px solid transparent';
-      });
-
-      const tsPanel    = document.getElementById('empTabTimesheet');
-      const projPanel  = document.getElementById('empTabProjects');
-      const attPanel   = document.getElementById('empTabAttendance');
-      if (tsPanel)   tsPanel.style.display   = tab === 'timesheet'   ? '' : 'none';
-      if (projPanel) projPanel.style.display = tab === 'projects'    ? '' : 'none';
-      if (attPanel)  attPanel.style.display  = tab === 'attendance'  ? '' : 'none';
-
-      if (tab === 'projects')    loadMyProjectsTab();
-      if (tab === 'attendance')  loadMyAttendanceTab();
-    });
-  });
+async function ensureEmpFullHistoryLoaded() {
+  if (EMP_DASH_FULL_HISTORY_LOADED) return;
+  try {
+    const data = await sheetGET({ action: 'getAllHistory', uid: USER.id });
+    EMP_DASH_FULL_HISTORY = Array.isArray(data) ? data : [];
+  } catch (err) {
+    console.warn('[myprojects-tab] Failed to load full history:', err.message);
+    EMP_DASH_FULL_HISTORY = [];
+  }
+  EMP_DASH_FULL_HISTORY_LOADED = true;
 }
 
-async function loadMyProjectsTab() {
-  const container = document.getElementById('myProjCardsContainer');
+// ── TAB SWITCHING ─────────────────────────────────────────────
+// The three containers this controls: #empTabProjects (My Dashboard,
+// default/active), #empTabTimesheet, #empTabAttendance.
+// Called directly from index.html's own startup script (already
+// present there as `initMyProjectsTab();` alongside initTable() /
+// initChart() / initLogin()) — this name has to match that call
+// exactly, it isn't wired via DOMContentLoaded.
+function initMyProjectsTab() {
+  document.querySelectorAll('.emp-tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => switchEmpTab(btn.dataset.empTab));
+  });
+  watchForEmployeeLogin();
+}
+
+// The dashboard needs to render as soon as an employee logs in
+// (it's the default tab, and it starts already marked "active" in
+// the HTML, so no click ever fires to trigger it). Rather than
+// depend on a manual one-line edit to auth.js's loginAs() — a single
+// missed edit silently leaves this tab stuck on its loading
+// placeholder forever, with no error anywhere — this polls for the
+// same signal auth.js itself sets on successful employee login
+// (the global USER, with MANAGER_MODE/TL_MODE/HR_MODE all false) and
+// renders itself the moment that appears. Fires once per login;
+// clears itself after logout (USER goes null/undefined again) so a
+// second employee login in the same tab renders correctly too.
+function watchForEmployeeLogin() {
+  setInterval(() => {
+    const isEmployeeSession =
+      typeof USER !== 'undefined' && USER && USER.id &&
+      !(typeof MANAGER_MODE !== 'undefined' && MANAGER_MODE) &&
+      !(typeof TL_MODE !== 'undefined' && TL_MODE) &&
+      !(typeof HR_MODE !== 'undefined' && HR_MODE);
+
+    if (!isEmployeeSession) {
+      EMP_DASHBOARD_RENDERED_FOR = null; // logged out / not an employee session — reset for next login
+      EMP_DASHBOARD_DATA_LOADED = false; // cached project/timesheet/salary data belonged to the previous session
+      EMP_DASH_FULL_HISTORY_LOADED = false; // full history belonged to the previous session too
+      return;
+    }
+    if (EMP_DASHBOARD_RENDERED_FOR === USER.id) return; // already rendered for this login
+
+    EMP_DASHBOARD_RENDERED_FOR = USER.id;
+    renderMyDashboardTab();
+  }, 400);
+}
+
+function switchEmpTab(tab) {
+  document.querySelectorAll('.emp-tab-btn').forEach(btn => {
+    const active = btn.dataset.empTab === tab;
+    btn.classList.toggle('active', active);
+    btn.style.color = active ? 'var(--a1)' : 'var(--muted)';
+    btn.style.borderBottomColor = active ? 'var(--a1)' : 'transparent';
+  });
+
+  const containerByTab = {
+    projects:   'empTabProjects',
+    timesheet:  'empTabTimesheet',
+    attendance: 'empTabAttendance',
+  };
+  Object.entries(containerByTab).forEach(([key, id]) => {
+    const el = $(id);
+    if (el) el.style.display = key === tab ? '' : 'none';
+  });
+
+  if (tab === 'projects') renderMyDashboardTab();
+  if (tab === 'attendance') renderMyAttendanceTab();
+}
+
+// ── DATA LOADING ──────────────────────────────────────────────
+// Everything needed for the budget bars, loaded once per session and
+// cached — a tab revisit after the first load is instant, no re-fetch.
+async function ensureEmpDashboardDataLoaded() {
+  if (EMP_DASHBOARD_DATA_LOADED) return;
+
+  const [projects, clients, tlData, historical] = await Promise.all([
+    sheetGET({ action: 'getProjectMasterList' }),
+    sheetGET({ action: 'getClientMasterList' }),
+    sheetGET({ action: 'getTLData' }),
+    sheetGET({ action: 'getHistoricalRecords', filters: encodeURIComponent(JSON.stringify({})) }),
+    ensureEmpFullHistoryLoaded(),
+  ]);
+
+  // Populate Client-Project.js's own globals — see the file header
+  // comment for why this is safe (CP_ROLE is never touched here).
+  CP_PROJECTS = (projects || []).map((p, idx) => ({ ...p, entryIndex: idx }));
+  CP_CLIENTS  = (clients  || []).map((c, idx) => ({ ...c,  entryIndex: idx }));
+  CP_EMPLOYEES = Array.isArray(LIVE_EMPLOYEES) ? LIVE_EMPLOYEES : [];
+  CP_TIMESHEET_DATA  = Array.isArray(tlData?.entries) ? tlData.entries : [];
+  CP_HISTORICAL_DATA = historical || [];
+
+  await ensureSalaryDataLoaded();
+  EMP_DASHBOARD_DATA_LOADED = true;
+}
+
+// This employee's own project names — matched against the full
+// Project Master list the same way every other panel in this app
+// matches Timesheet entries to a project (by name, since that's what
+// a Timesheet entry actually carries). Uses full history, not the
+// 10-day-capped ENTRIES, so a project worked on further back still
+// shows a card.
+function getMyWorkedProjects() {
+  const myProjectNames = new Set(
+    EMP_DASH_FULL_HISTORY.filter(e => e.status !== 'Leave' && e.project).map(e => e.project)
+  );
+  return CP_PROJECTS.filter(p => myProjectNames.has(p.projectName));
+}
+
+// Project names this employee has logged hours against that have NO
+// matching row in the real Project Master list (e.g. "timesheet" or
+// "Holiday" — values that appear in Timesheet entries but were never
+// set up as an actual project). These can't get a budget card (no
+// Constant, no client, no status to show), but they shouldn't just
+// silently vanish from the dashboard either — buildEmpUnmatchedProjectCard
+// gives them a minimal informational card instead.
+function getMyUnmatchedProjectNames() {
+  const matchedNames = new Set(CP_PROJECTS.map(p => p.projectName));
+  const allNames = new Set(
+    EMP_DASH_FULL_HISTORY.filter(e => e.status !== 'Leave' && e.project).map(e => e.project)
+  );
+  return [...allNames].filter(n => !matchedNames.has(n));
+}
+
+function buildEmpUnmatchedProjectCard(name) {
+  const relevant = EMP_DASH_FULL_HISTORY.filter(e => e.project === name && e.status !== 'Leave');
+  const hours = relevant.reduce((s, e) => s + Number(e.hours || 0), 0);
+  const days = new Set(relevant.map(e => e.date)).size;
+
+  return `
+    <div class="cp-entity-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:.4rem;flex-wrap:wrap;">
+        <div class="cp-entity-name" style="font-size:14px;">${esc(name)}
+          <span style="font-size:9.5px;font-weight:700;color:var(--txt2);background:var(--surface2,#20242e);
+            border-radius:8px;padding:1px 6px;margin-left:4px;vertical-align:middle;">No project record</span>
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);">Your hours: <strong>${esc(fh(hours))}</strong> across ${days} day${days !== 1 ? 's' : ''}</div>
+    </div>`;
+}
+
+// ── RENDER ────────────────────────────────────────────────────
+async function renderMyDashboardTab() {
+  const container = $('myProjCardsContainer');
   if (!container) return;
+
+  // ensureCPStyles() (from Client-Project.js) injects the .cp-entity-
+  // card/.cp-status-pill/etc. styles into <head> — it only ever runs
+  // there via the Manager/TL tabs, which a normal employee session
+  // may never open. Calling it here (it's idempotent — a no-op if
+  // already injected) guarantees those styles exist regardless.
+  if (typeof ensureCPStyles === 'function') ensureCPStyles();
 
   container.innerHTML = `<div class="slot-loading"><div class="slot-spinner"></div><span>Loading…</span></div>`;
 
   try {
-    const [master, history] = await Promise.all([
-      MYPROJ_MASTER_CACHE ? Promise.resolve(MYPROJ_MASTER_CACHE)
-        : sheetGET({ action: 'getProjectMasterList', role: 'employee' }),
-      (typeof MY_PROJECTS_CACHE !== 'undefined' && MY_PROJECTS_CACHE) ? Promise.resolve(MY_PROJECTS_CACHE)
-        : apiGetAllHistory(USER.id),
-    ]);
-    MYPROJ_MASTER_CACHE = master;
-    if (typeof MY_PROJECTS_CACHE !== 'undefined') MY_PROJECTS_CACHE = history; // keep chart.js's cache in sync too
-
-    renderMyProjectCards(container, master, history);
+    await ensureEmpDashboardDataLoaded();
   } catch (err) {
-    container.innerHTML = `<div class="slot-error">Failed to load: ${err.message}</div>`;
-  }
-}
-
-function renderMyProjectCards(container, master, history) {
-  const worked = (history || []).filter(e => e.status !== 'Leave' && e.project);
-  if (!worked.length) {
-    container.innerHTML = `<div class="chart-empty">You haven't logged hours against any project yet.</div>`;
+    container.innerHTML = `<div class="slot-error">Failed to load your dashboard: ${esc(err.message)}</div>`;
     return;
   }
 
-  const byProjectName = {};
-  worked.forEach(e => {
-    if (!byProjectName[e.project]) byProjectName[e.project] = { hours: 0, days: new Set() };
-    byProjectName[e.project].hours += Number(e.hours) || 0;
-    byProjectName[e.project].days.add(e.date);
+  let myProjects, unmatchedNames;
+  try {
+    myProjects = getMyWorkedProjects();
+    unmatchedNames = getMyUnmatchedProjectNames();
+  } catch (err) {
+    container.innerHTML = `<div class="slot-error">Failed to display your dashboard: ${esc(err.message)}</div>`;
+    return;
+  }
+
+  // Personal stats — computed entirely from this employee's own
+  // ENTRIES (already loaded at login, no extra fetch needed). Shown
+  // above the project budget cards regardless of whether any project
+  // cards exist, so a brand-new employee with zero project hours
+  // still sees "no hours logged" states here rather than a blank page.
+  const statsHtml = `
+    <div style="display:flex;flex-direction:column;gap:1.25rem;margin-bottom:1.5rem;">
+      ${buildTodayRingSection()}
+      ${buildLast5DaysSection(EMP_DASH_ANCHOR_DATE)}
+      ${buildAllTimeProjectsSection()}
+    </div>`;
+
+  const hasAnyCards = myProjects.length > 0 || unmatchedNames.length > 0;
+  const projectsHtml = hasAnyCards
+    ? `<div class="cp-card-grid" style="grid-template-columns:1fr;">
+        ${myProjects.map(buildEmpDashboardCard).join('')}
+        ${unmatchedNames.map(buildEmpUnmatchedProjectCard).join('')}
+      </div>`
+    : `<div class="chart-empty">You haven't logged hours on any project yet.</div>`;
+
+  container.innerHTML = statsHtml + projectsHtml;
+
+  $('empDashAnchorDate')?.addEventListener('change', e => {
+    EMP_DASH_ANCHOR_DATE = e.target.value || todayStr();
+    renderMyDashboardTab(); // full re-render — cheap, everything used here is already in memory
   });
 
-  const projectNames = Object.keys(byProjectName)
-    .sort((a, b) => byProjectName[b].hours - byProjectName[a].hours);
-
-  const blocksHtml = projectNames.map(name => {
-    const stats = byProjectName[name];
-    const proj  = (master || []).find(p => p.projectName === name);
-    return buildMyProjectCard(name, proj, stats);
-  }).join('');
-
-  // Single column, full-width blocks — not a card grid.
-  container.innerHTML = `<div>${blocksHtml}</div>`;
-
-  container.querySelectorAll('.myproj-view-btn').forEach(btn => {
-    btn.addEventListener('click', () => openMyProjectDetail(btn.dataset.project));
-  });
+  $('empDashViewAttendanceBtn')?.addEventListener('click', () => switchEmpTab('attendance'));
 }
 
-function buildMyProjectCard(projectName, proj, stats) {
-  const initials  = (projectName || '?').trim().slice(0, 2).toUpperCase();
-  const projectId = proj?.projectId || '—';
-  const startDate = fmtMyProjDate(proj?.startDate);
-  const endDate   = fmtMyProjDate(proj?.endDate);
-  const mgrNote   = (proj?.managerNotes || '').trim()    || 'No notes yet';
-  const tlNote    = (proj?.teamLeaderNotes || '').trim() || 'No notes yet';
-  const days      = stats.days.size;
-  const hours     = fmtMyProjHours(stats.hours);
+// ── PERSONAL STATS — today's ring, last 5 days, all-time bars ──
+// All three sections read only ENTRIES (this employee's own data,
+// already loaded at login) — no network calls, no cross-employee
+// data, nothing salary/cost-related.
 
-  // One full-width horizontal block per project — everything on one
-  // row (identity, dates, days/hours, View Details), notes as a
-  // secondary row underneath. Replaces the earlier card grid.
+// A stable color per project NAME (not ID — some entries carry a
+// pseudo-project value like "internal" that has no real Project
+// Master row), reusing Client-Project.js's own hashing so a
+// project's color is consistent with everywhere else it's colored.
+// Normalized (trimmed + lowercased) before hashing — the same
+// project can otherwise get two different colors across days if the
+// raw Timesheet data has inconsistent casing or stray whitespace for
+// the same name (e.g. "VGN Meridian" one day, "VGN Meridian " with a
+// trailing space another day — different strings, different hash,
+// different color, even though it's clearly the same project).
+function empDashProjectColor(name) {
+  const key = String(name || '').trim().toLowerCase();
+  return typeof getColorForKey === 'function' ? getColorForKey('proj:' + key) : '#4f8ef7';
+}
+
+function buildTodayRingSVG(segments, totalHours) {
+  if (!totalHours) {
+    return `<svg viewBox="0 0 200 200" width="160" height="160"><circle cx="100" cy="100" r="80" fill="none" stroke="var(--border-md,#3a3f4b)" stroke-width="18"/></svg>`;
+  }
+  let angle = -90;
+  const paths = segments.map(seg => {
+    const end = angle + (seg.hours / totalHours) * 360;
+    const d = buildReportDonutPath(100, 100, 80, 62, angle, end);
+    const color = empDashProjectColor(seg.name);
+    angle = end;
+    return `<path d="${d}" fill="${color}"/>`;
+  }).join('');
+  return `<svg viewBox="0 0 200 200" width="160" height="160" xmlns="http://www.w3.org/2000/svg">${paths}</svg>`;
+}
+
+function buildTodayRingSection() {
+  const recentDates = new Set(getEmpDashRecentDays(todayStr(), EMP_DASH_RECENT_DAYS_COUNT));
+  const byProj = {};
+  EMP_DASH_FULL_HISTORY
+    .filter(e => recentDates.has(e.date) && e.status !== 'Leave' && e.project)
+    .forEach(e => { byProj[e.project] = (byProj[e.project] || 0) + Number(e.hours || 0); });
+
+  const segments = Object.entries(byProj)
+    .map(([name, hours]) => ({ name, hours }))
+    .sort((a, b) => b.hours - a.hours);
+  const totalHours = segments.reduce((s, x) => s + x.hours, 0);
+
+  const legend = segments.length
+    ? segments.map(seg => {
+        const pct = totalHours ? Math.round((seg.hours / totalHours) * 100) : 0;
+        return `
+          <div style="display:flex;align-items:center;gap:10px;padding:6px 0;">
+            <span style="width:9px;height:9px;border-radius:50%;background:${empDashProjectColor(seg.name)};flex-shrink:0;"></span>
+            <span style="flex:1;min-width:0;font-size:13px;font-weight:600;color:var(--txt1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(seg.name)}</span>
+            <span style="font-size:12px;font-weight:700;color:var(--txt1);white-space:nowrap;">${esc(fh(seg.hours))}</span>
+            <span style="font-size:11px;color:var(--txt2,var(--muted));width:36px;text-align:right;">${pct}%</span>
+          </div>`;
+      }).join('')
+    : `<div style="font-size:12px;color:var(--txt2,var(--muted));">No hours logged in the last ${EMP_DASH_RECENT_DAYS_COUNT} days.</div>`;
+
   return `
-    <div style="background:var(--surface1);border:1px solid var(--border);border-radius:12px;
-      padding:1rem 1.2rem;margin-bottom:1rem;">
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;">
-        <div style="display:flex;align-items:center;gap:10px;min-width:180px;flex:1 1 220px;">
-          <div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,var(--a1),#7c5cfc);
-            display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12.5px;color:#fff;flex-shrink:0;">${esc(initials)}</div>
-          <div style="min-width:0;">
-            <div style="font-weight:700;font-size:14px;color:var(--txt1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${esc(projectName)}">${esc(projectName)}</div>
-            <div style="font-size:11px;color:var(--txt2);">${esc(projectId)}</div>
-          </div>
-        </div>
-
-        <div style="display:flex;gap:22px;flex-wrap:wrap;">
-          <div>
-            <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;">Start</div>
-            <div style="font-size:12.5px;font-weight:700;color:var(--txt1);white-space:nowrap;">${esc(startDate)}</div>
-          </div>
-          <div>
-            <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;">End</div>
-            <div style="font-size:12.5px;font-weight:700;color:var(--txt1);white-space:nowrap;">${esc(endDate)}</div>
-          </div>
-          <div>
-            <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;">Days</div>
-            <div style="font-size:12.5px;font-weight:700;color:var(--txt1);">${days}</div>
-          </div>
-          <div>
-            <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;">Hours</div>
-            <div style="font-size:12.5px;font-weight:700;color:var(--a1);white-space:nowrap;">${esc(hours)}</div>
-          </div>
-        </div>
-
-        <button class="myproj-view-btn" data-project="${esc(projectName)}" style="background:var(--a1);color:#fff;border:none;
-          border-radius:8px;padding:8px 16px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;">
-          View Details →
-        </button>
-      </div>
-
-      <div style="display:flex;gap:28px;flex-wrap:wrap;margin-top:.85rem;padding-top:.75rem;border-top:1px solid var(--border);">
-        <div style="flex:1 1 200px;min-width:180px;">
-          <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px;">Manager Note</div>
-          <div style="font-size:11.5px;color:var(--txt1);">${esc(mgrNote)}</div>
-        </div>
-        <div style="flex:1 1 200px;min-width:180px;">
-          <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px;">Team Leader Note</div>
-          <div style="font-size:11.5px;color:var(--txt1);">${esc(tlNote)}</div>
+    <div class="cp-card" style="display:flex;align-items:center;gap:28px;flex-wrap:wrap;">
+      <div style="position:relative;width:160px;height:160px;flex-shrink:0;">
+        ${buildTodayRingSVG(segments, totalHours)}
+        <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 14px;text-align:center;">
+          <div style="font-size:18px;font-weight:800;color:var(--txt1);line-height:1.1;white-space:nowrap;">${esc(fh(totalHours))}</div>
+          <div style="font-size:8.5px;letter-spacing:.5px;color:var(--txt2,var(--muted));margin-top:2px;">LAST ${EMP_DASH_RECENT_DAYS_COUNT} DAYS</div>
         </div>
       </div>
+      <div style="flex:1;min-width:220px;">${legend}</div>
     </div>`;
 }
 
-// ══════════════════════════════════════════════════════════════
-// PROJECT DETAIL — reached via "View Details" on a card. Shows this
-// employee's own day-by-day notes, a month-by-month summary, a
-// task-by-task time breakdown for one project, plus two report
-// downloads (This Month / Overall), same print-to-PDF pattern used
-// on the Manager/TL side — no PDF library, just a clean printable
-// HTML page and the browser's own Print → Save as PDF.
-// ══════════════════════════════════════════════════════════════
-
-// This employee's own entries for one project, grouped by date —
-// hours summed and notes collected per day. Independent of the
-// per-project TOTALS already computed in renderMyProjectCards, since
-// the detail page needs the full day-by-day breakdown, not just a
-// grand total.
-function getMyProjectDailyLog(projectName) {
-  const history = (typeof MY_PROJECTS_CACHE !== 'undefined' && MY_PROJECTS_CACHE) || [];
-  const byDate = {};
-  history.forEach(e => {
-    if (e.project !== projectName || !e.date) return;
-    if (!byDate[e.date]) byDate[e.date] = { hours: 0, notes: [], timeIns: [], timeOuts: [], isLeave: false };
-
-    if (e.status === 'Leave') {
-      byDate[e.date].isLeave = true;
-      return; // Leave entries carry no check-in/out or worked hours
-    }
-    byDate[e.date].hours += Number(e.hours) || 0;
-    if (e.notes && e.notes.trim()) byDate[e.date].notes.push(e.notes.trim());
-    if (e.timeIn)  byDate[e.date].timeIns.push(e.timeIn);
-    if (e.timeOut) byDate[e.date].timeOuts.push(e.timeOut);
-  });
-
-  // Earliest Check-In / latest Check-Out per day — the exact same
-  // convention already used by the Manager Attendance module
-  // (cpGetEmpDayAttendance in Client-Project.js), just applied here
-  // scoped to one project instead of an employee's whole day.
-  Object.values(byDate).forEach(d => {
-    d.checkIn  = d.timeIns.sort()[0] || null;
-    d.checkOut = d.timeOuts.sort().pop() || null;
-  });
-
-  const dates = Object.keys(byDate).sort((a, b) => b.localeCompare(a)); // most recent first
-  return { byDate, dates };
-}
-
-function fmtMyProj12(t) {
-  if (!t) return '--:--';
-  const [h, m] = t.split(':').map(Number);
-  return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
-}
-
-function getMyProjectMonthlySummary(byDate, dates) {
-  const byMonth = {};
-  dates.forEach(date => {
-    const m = date.slice(0, 7);
-    byMonth[m] = (byMonth[m] || 0) + byDate[date].hours;
-  });
-  return Object.keys(byMonth).sort().reverse().map(m => ({ month: m, hours: byMonth[m] }));
-}
-
-// How much time was spent on each distinct Task within this project.
-// Optionally scoped to a date range (fromDate/toDate inclusive) — the
-// on-screen detail view shows all-time (no range given), while the
-// printable report scopes this to whatever period it's reporting on,
-// same as the existing Daily Log does there.
-function getMyProjectTaskBreakdown(projectName, fromDate, toDate) {
-  const history = (typeof MY_PROJECTS_CACHE !== 'undefined' && MY_PROJECTS_CACHE) || [];
-  const byTask = {}; // task -> { hours, byDate: { date: hours } }
-  history.forEach(e => {
-    if (e.project !== projectName || e.status === 'Leave' || !e.date) return;
-    if (fromDate && e.date < fromDate) return;
-    if (toDate && e.date > toDate) return;
-    const task = (e.task && e.task.trim()) || 'Unspecified';
-    const h = Number(e.hours) || 0;
-    if (!byTask[task]) byTask[task] = { hours: 0, byDate: {} };
-    byTask[task].hours += h;
-    byTask[task].byDate[e.date] = (byTask[task].byDate[e.date] || 0) + h; // same task can span multiple dates (and multiple slots on one date) — summed per date here
-  });
-  return Object.entries(byTask)
-    .map(([task, data]) => ({
-      task, hours: data.hours,
-      dateEntries: Object.entries(data.byDate)
-        .map(([date, hours]) => ({ date, hours }))
-        .sort((a, b) => b.date.localeCompare(a.date)), // most recent date first
-    }))
-    .sort((a, b) => b.hours - a.hours);
-}
-
-function fmtMyProjMonthLabel(monthKey) {
-  return new Date(monthKey + '-01').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
-}
-
-function openMyProjectDetail(projectName) {
-  const container = document.getElementById('myProjCardsContainer');
-  if (!container) return;
-
-  const proj = (MYPROJ_MASTER_CACHE || []).find(p => p.projectName === projectName);
-  const { byDate, dates } = getMyProjectDailyLog(projectName);
-  const monthly = getMyProjectMonthlySummary(byDate, dates);
-  const maxMonthHours = Math.max(...monthly.map(m => m.hours), 0.01);
-
-  const taskBreakdown = getMyProjectTaskBreakdown(projectName); // all-time, on-screen view
-  const maxTaskHours = Math.max(...taskBreakdown.map(t => t.hours), 0.01);
-
-  const monthRows = monthly.length ? monthly.map((m, i) => {
-    const pct = Math.max((m.hours / maxMonthHours) * 100, 2);
-    const isLast = i === monthly.length - 1;
-    return `
-      <div style="display:flex;align-items:center;gap:12px;padding:8px 0;${isLast ? '' : 'border-bottom:1px solid var(--border);'}">
-        <span style="flex:0 0 92px;font-size:12px;font-weight:700;color:var(--txt1);">${esc(fmtMyProjMonthLabel(m.month))}</span>
-        <div style="flex:1;height:11px;background:var(--surface2);border-radius:6px;overflow:hidden;">
-          <div style="width:${pct}%;height:100%;background:var(--a1);border-radius:6px;"></div>
-        </div>
-        <span style="flex:0 0 64px;text-align:right;font-size:12px;font-weight:700;color:var(--txt1);">${esc(fmtMyProjHours(m.hours))}</span>
-      </div>`;
-  }).join('') : `<div style="font-size:12px;color:var(--txt2);">No activity yet.</div>`;
-
-  const taskRows = taskBreakdown.length ? taskBreakdown.map((t, i) => {
-    const pct = Math.max((t.hours / maxTaskHours) * 100, 2);
-    const isLast = i === taskBreakdown.length - 1;
-    const dateRowsHtml = t.dateEntries.map(d => `
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0 5px 24px;font-size:11px;">
-        <span style="color:var(--txt2);">📅 ${esc(fmtMyProjDate(d.date))}</span>
-        <span style="font-weight:600;color:var(--txt1);">${esc(fmtMyProjHours(d.hours))}</span>
-      </div>`).join('');
-    // Visible proof, not just a claim: this re-sums the exact rows
-    // shown above and displays it right here, so it can be checked by
-    // eye against the task's header total (${esc(fmtMyProjHours(t.hours))}) without doing the math yourself.
-    const dateSumCheck = t.dateEntries.reduce((s, d) => s + d.hours, 0);
-    const sumRowHtml = `
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0 2px 24px;
-        margin-top:4px;border-top:1px dashed var(--border);font-size:11px;">
-        <span style="color:var(--txt2);font-weight:600;">Total of dates above</span>
-        <span style="font-weight:700;color:var(--a1);">${esc(fmtMyProjHours(dateSumCheck))}</span>
-      </div>`;
-    return `
-      <details style="padding:8px 0;${isLast ? '' : 'border-bottom:1px solid var(--border);'}">
-        <summary style="display:flex;align-items:center;gap:12px;cursor:pointer;">
-          <span style="flex:0 0 14px;font-size:9px;color:var(--txt2);">▸</span>
-          <span style="flex:0 0 130px;font-size:12px;font-weight:700;color:var(--txt1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${esc(t.task)}">${esc(t.task)}</span>
-          <div style="flex:1;height:11px;background:var(--surface2);border-radius:6px;overflow:hidden;">
-            <div style="width:${pct}%;height:100%;background:var(--a1);border-radius:6px;"></div>
-          </div>
-          <span style="flex:0 0 64px;text-align:right;font-size:12px;font-weight:700;color:var(--txt1);">${esc(fmtMyProjHours(t.hours))}</span>
-          <span style="flex:0 0 50px;text-align:right;font-size:10px;color:var(--txt2);">${t.dateEntries.length} date${t.dateEntries.length !== 1 ? 's' : ''}</span>
-        </summary>
-        <div style="margin-top:2px;">${dateRowsHtml}${sumRowHtml}</div>
-      </details>`;
-  }).join('') : `<div style="font-size:12px;color:var(--txt2);">No activity yet.</div>`;
-
-  const dailyRows = dates.length ? dates.map((date, i) => {
-    const d = byDate[date];
-    const isLast = i === dates.length - 1;
-
-    const timeLine = d.isLeave
-      ? `<span style="font-size:11px;font-weight:700;color:#fb923c;">🏖 Leave</span>`
-      : (d.checkIn && d.checkOut)
-        ? `<span style="font-size:11px;color:var(--txt2);">${esc(fmtMyProj12(d.checkIn))} → ${esc(fmtMyProj12(d.checkOut))}</span>`
-        : `<span style="font-size:11px;color:var(--txt2);">—</span>`;
-
-    const hoursLine = d.isLeave
-      ? `<span style="font-size:12.5px;font-weight:800;color:#fb923c;">—</span>`
-      : `<span style="font-size:12.5px;font-weight:800;color:#34d399;">${esc(fmtMyProjHours(d.hours))}</span>`;
-
-    return `
-      <div style="padding:8px 0;${isLast ? '' : 'border-bottom:1px solid var(--border);'}">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px;gap:8px;">
-          <span style="font-size:12px;font-weight:700;color:var(--txt1);">${esc(fmtMyProjDate(date))}</span>
-          ${hoursLine}
-        </div>
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-          ${timeLine}
-          <div style="font-size:11px;color:var(--txt2);text-align:right;">${esc(d.notes.join(' · ') || (d.isLeave ? '' : 'No notes'))}</div>
-        </div>
-      </div>`;
-  }).join('') : `<div style="font-size:12px;color:var(--txt2);">No entries yet.</div>`;
-
-  const mgrNote = (proj?.managerNotes || '').trim();
-  const tlNote  = (proj?.teamLeaderNotes || '').trim();
-
-  container.innerHTML = `
-    <button id="myProjBackBtn" class="cp-back-btn" style="margin-bottom:1rem;">← Back</button>
-
-    <div style="background:var(--surface1);border:1px solid var(--border);border-radius:14px;padding:1.2rem;margin-bottom:1.1rem;">
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:1rem;">
-        <div>
-          <div style="font-weight:700;font-size:17px;color:var(--txt1);">${esc(projectName)}</div>
-          <div style="font-size:11.5px;color:var(--txt2);">${esc(proj?.projectId || '—')}</div>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button id="myProjReportMonth" class="cp-btn-ghost">📥 This Month</button>
-          <button id="myProjReportOverall" class="cp-btn-ghost">📥 Overall Report</button>
-        </div>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-        <div style="background:var(--surface2);border-radius:8px;padding:8px 10px;">
-          <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;margin-bottom:3px;">Start Date</div>
-          <div style="font-size:12.5px;font-weight:700;color:var(--txt1);">${esc(fmtMyProjDate(proj?.startDate))}</div>
-        </div>
-        <div style="background:var(--surface2);border-radius:8px;padding:8px 10px;">
-          <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;margin-bottom:3px;">End Date</div>
-          <div style="font-size:12.5px;font-weight:700;color:var(--txt1);">${esc(fmtMyProjDate(proj?.endDate))}</div>
-        </div>
-      </div>
-    </div>
-
-    <div style="background:var(--surface1);border:1px solid var(--border);border-radius:14px;padding:1.2rem;margin-bottom:1.1rem;">
-      <div style="font-weight:700;font-size:14px;color:var(--txt1);margin-bottom:.9rem;">🗒️ Notes</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-        <div>
-          <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;margin-bottom:5px;">Manager Notes</div>
-          <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;
-            font-size:12.5px;color:${mgrNote ? 'var(--txt1)' : 'var(--txt2)'};font-style:${mgrNote ? 'normal' : 'italic'};min-height:20px;">
-            ${esc(mgrNote || 'No notes yet')}
-          </div>
-        </div>
-        <div>
-          <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;margin-bottom:5px;">Team Leader Notes</div>
-          <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;
-            font-size:12.5px;color:${tlNote ? 'var(--txt1)' : 'var(--txt2)'};font-style:${tlNote ? 'normal' : 'italic'};min-height:20px;">
-            ${esc(tlNote || 'No notes yet')}
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div style="background:var(--surface1);border:1px solid var(--border);border-radius:14px;padding:1.2rem;margin-bottom:1.1rem;">
-      <div style="font-weight:700;font-size:14px;color:var(--txt1);margin-bottom:.9rem;">📅 Monthly Summary</div>
-      ${monthRows}
-    </div>
-
-    <div style="background:var(--surface1);border:1px solid var(--border);border-radius:14px;padding:1.2rem;margin-bottom:1.1rem;">
-      <div style="font-weight:700;font-size:14px;color:var(--txt1);margin-bottom:.9rem;">🧩 Task Breakdown</div>
-      ${taskRows}
-    </div>
-
-    <div style="background:var(--surface1);border:1px solid var(--border);border-radius:14px;padding:1.2rem;">
-      <div style="font-weight:700;font-size:14px;color:var(--txt1);margin-bottom:.9rem;">📝 Daily Notes</div>
-      ${dailyRows}
-    </div>
-  `;
-
-  document.getElementById('myProjBackBtn').addEventListener('click', () => {
-    renderMyProjectCards(container, MYPROJ_MASTER_CACHE, MY_PROJECTS_CACHE);
-  });
-  document.getElementById('myProjReportMonth').addEventListener('click', () => downloadMyProjectReport(projectName, proj, 'month'));
-  document.getElementById('myProjReportOverall').addEventListener('click', () => downloadMyProjectReport(projectName, proj, 'overall'));
-}
-
-// Opens a new tab with a clean printable report and triggers the
-// browser's own Print dialog — "Save as PDF" is a built-in
-// destination on every major browser. Same approach as the Manager/
-// TL Project Report, just scoped to this one employee's own entries.
-function downloadMyProjectReport(projectName, proj, mode) {
-  const win = window.open('', '_blank');
-  if (!win) {
-    toast?.('e', 'Popup blocked', 'Please allow popups for this site, then try again.');
-    return;
-  }
-  win.document.open();
-  win.document.write(buildMyProjectReportHTML(projectName, proj, mode));
-  win.document.close();
-  setTimeout(() => { win.focus(); win.print(); }, 400);
-}
-
-function buildMyProjectReportHTML(projectName, proj, mode) {
-  const { byDate, dates } = getMyProjectDailyLog(projectName);
-  const today = todayStr();
-
-  let fromDate, toDate, periodLabel, reportTypeLabel;
-  if (mode === 'month') {
-    const m = today.slice(0, 7);
-    fromDate = m + '-01';
-    toDate   = today;
-    periodLabel = fmtMyProjMonthLabel(m);
-    reportTypeLabel = 'Monthly Report';
-  } else {
-    let earliest = dates.length ? dates[dates.length - 1] : null; // dates sorted desc -> last is earliest
-    if (proj?.startDate && (!earliest || proj.startDate < earliest)) earliest = proj.startDate;
-    fromDate = earliest || today;
-    toDate   = today;
-    periodLabel = `${fmtMyProjDate(fromDate)} – ${fmtMyProjDate(toDate)}`;
-    reportTypeLabel = 'Overall Report';
-  }
-
-  const rangeDates  = dates.filter(d => d >= fromDate && d <= toDate).sort(); // chronological for the report
-  const totalHours  = rangeDates.reduce((s, d) => s + byDate[d].hours, 0);
-  const totalDays   = rangeDates.filter(d => !byDate[d].isLeave).length; // Leave dates are now included in byDate for the attendance display, so this must exclude them explicitly
-  const empName     = (typeof USER !== 'undefined' && USER?.name) || '';
-
-  // Same task-by-task breakdown as the on-screen detail view, but
-  // scoped to this report's exact period rather than all-time.
-  const taskBreakdown = getMyProjectTaskBreakdown(projectName, fromDate, toDate);
-
-  const logRows = rangeDates.length ? rangeDates.map(d => {
-    const rec = byDate[d];
-    const timeCell = rec.isLeave ? 'Leave' : (rec.checkIn && rec.checkOut ? `${fmtMyProj12(rec.checkIn)} – ${fmtMyProj12(rec.checkOut)}` : '—');
-    const hoursCell = rec.isLeave ? '—' : fmtMyProjHours(rec.hours);
-    return `
-    <tr>
-      <td style="padding:6px 9px;border:1px solid #e2e8f0;white-space:nowrap;">${esc(fmtMyProjDate(d))}</td>
-      <td style="padding:6px 9px;border:1px solid #e2e8f0;white-space:nowrap;">${esc(timeCell)}</td>
-      <td style="padding:6px 9px;border:1px solid #e2e8f0;text-align:right;white-space:nowrap;">${esc(hoursCell)}</td>
-      <td style="padding:6px 9px;border:1px solid #e2e8f0;">${esc(rec.notes.join(' · ') || '—')}</td>
-    </tr>`;
-  }).join('') : `<tr><td colspan="4" style="padding:10px;color:#64748b;">No activity logged during this period.</td></tr>`;
-
-  const taskRowsPrint = taskBreakdown.length ? taskBreakdown.map(t => {
-    const taskRow = `
-    <tr>
-      <td style="padding:6px 9px;border:1px solid #e2e8f0;font-weight:700;">${esc(t.task)}</td>
-      <td style="padding:6px 9px;border:1px solid #e2e8f0;text-align:right;font-weight:700;white-space:nowrap;">${esc(fmtMyProjHours(t.hours))}</td>
-    </tr>`;
-    // A print report can't have click-to-expand, so the date-level
-    // breakdown (the "multiple parts" that made up this task's total)
-    // is shown directly as indented sub-rows instead.
-    const dateSubRows = t.dateEntries.map(d => `
-    <tr>
-      <td style="padding:3px 9px 3px 24px;border:1px solid #e2e8f0;color:#64748b;font-size:10.5px;">${esc(fmtMyProjDate(d.date))}</td>
-      <td style="padding:3px 9px;border:1px solid #e2e8f0;text-align:right;color:#64748b;font-size:10.5px;white-space:nowrap;">${esc(fmtMyProjHours(d.hours))}</td>
-    </tr>`).join('');
-    return taskRow + dateSubRows;
-  }).join('') : `<tr><td colspan="2" style="padding:10px;color:#64748b;">No task data for this period.</td></tr>`;
-
-  const summaryText = totalDays
-    ? `Over this period, ${empName} logged ${fmtMyProjHours(totalHours)} across ${totalDays} day${totalDays !== 1 ? 's' : ''} on ${projectName}.`
-    : `No activity was logged on ${projectName} during this period.`;
-
-  const genStamp = new Date().toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<title>${esc(projectName)} — ${esc(reportTypeLabel)}</title>
-<style>
-  * { box-sizing: border-box; }
-  body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; margin:0; padding:28px; background:#eef2ff; color:#1e293b; }
-  .sheet { max-width:820px; margin:0 auto; background:#fff; border-radius:16px; padding:36px 42px 44px; box-shadow:0 4px 24px rgba(0,0,0,.06); }
-  h1 { font-size:25px; color:#2563eb; margin:0 0 4px; font-weight:800; }
-  .sub { font-size:12px; color:#64748b; margin-bottom:20px; }
-  .infobar { display:flex; gap:28px; flex-wrap:wrap; padding:14px 0; border-top:1px solid #e2e8f0; border-bottom:1px solid #e2e8f0; margin-bottom:26px; }
-  .infobar div { font-size:12.5px; }
-  .infobar b { display:block; color:#2563eb; font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; margin-bottom:3px; font-weight:700; }
-  h2 { font-size:14px; color:#2563eb; margin:26px 0 12px; font-weight:800; }
-  table { border-collapse:collapse; width:100%; font-size:11.5px; }
-  .footer { margin-top:30px; font-size:10.5px; color:#94a3b8; text-align:right; }
-  @media print {
-    body { background:#fff; padding:0; }
-    .sheet { box-shadow:none; border-radius:0; max-width:100%; padding:0; }
-  }
-</style>
-</head>
-<body>
-  <div class="sheet">
-    <h1>${esc(projectName)}</h1>
-    <div class="sub">${esc(reportTypeLabel)} · ${esc(proj?.projectId || '—')} · ${esc(empName)}</div>
-
-    <div class="infobar">
-      <div><b>Report Type</b>${esc(reportTypeLabel)}</div>
-      <div><b>Period</b>${esc(periodLabel)}</div>
-      <div><b>Total Hours</b>${esc(fmtMyProjHours(totalHours))}</div>
-      <div><b>Days Worked</b>${totalDays}</div>
-    </div>
-
-    <h2>Task Breakdown</h2>
-    <table>
-      <thead>
-        <tr style="background:#eef2ff;">
-          <th style="text-align:left;padding:7px 9px;border:1px solid #dbeafe;color:#334155;">Task</th>
-          <th style="text-align:right;padding:7px 9px;border:1px solid #dbeafe;color:#334155;">Hours</th>
-        </tr>
-      </thead>
-      <tbody>${taskRowsPrint}</tbody>
-    </table>
-
-    <h2>Daily Log</h2>
-    <table>
-      <thead>
-        <tr style="background:#eef2ff;">
-          <th style="text-align:left;padding:7px 9px;border:1px solid #dbeafe;color:#334155;">Date</th>
-          <th style="text-align:left;padding:7px 9px;border:1px solid #dbeafe;color:#334155;">Check-In → Check-Out</th>
-          <th style="text-align:right;padding:7px 9px;border:1px solid #dbeafe;color:#334155;">Hours</th>
-          <th style="text-align:left;padding:7px 9px;border:1px solid #dbeafe;color:#334155;">Notes</th>
-        </tr>
-      </thead>
-      <tbody>${logRows}</tbody>
-    </table>
-
-    <h2>Summary</h2>
-    <div style="font-size:12.5px;color:#334155;line-height:1.6;">${esc(summaryText)}</div>
-
-    <div class="footer">Generated ${esc(genStamp)}</div>
-  </div>
-</body>
-</html>`;
-}
-
-// ══════════════════════════════════════════════════════════════
-// MY ATTENDANCE — calendar-grid view (dates as columns), Employee
-// portal's own version of the Manager Attendance grid.
-//
-// Status/permission logic is the SAME convention as the Manager
-// grid (cpGetEmpDayAttendance / getEmpDayStatus in Client-Project.js
-// — worked/leave/holiday/weekend/no-entry, FULL_DAY_HOURS = 9 for
-// Permission Hours). It's re-expressed here rather than called
-// directly because those functions read CP_TIMESHEET_DATA/
-// CP_EMPLOYEES, which are Manager/Team-Leader-portal globals not
-// populated on the Employee portal — this reads MY_PROJECTS_CACHE
-// instead (this employee's own history, already fetched for the
-// My Projects tab). Same rules, same FULL_DAY_HOURS baseline, no
-// new calculation invented.
-// ══════════════════════════════════════════════════════════════
-
-const MYATT_FULL_DAY_HOURS = 9; // must match FULL_DAY_HOURS in Client-Project.js's renderAttendanceGrid()
-// Same threshold/badge as the Timesheet table (table.js's
-// OVERTIME_THRESHOLD_HOURS) — kept as its own constant here since
-// this file doesn't share scope with table.js, but the value and
-// meaning must stay identical: a day's worked hours (Leave excluded)
-// past this counts as overtime.
-const MYATT_OVERTIME_THRESHOLD_HOURS = 9;
-const MYATT_MONTH_FLOOR = '2026-07'; // earliest month offered in the dropdown — matches CP_ATTEND_MONTH_FLOOR
-let MYATT_RANGE_MODE  = '15days'; // '15days' | 'month'
-let MYATT_MONTH       = '';       // 'YYYY-MM', used when MYATT_RANGE_MODE === 'month'
-
-function loadMyAttendanceTab() {
-  const bar = document.getElementById('myAttendRangeBar');
-  const tod = todayStr();
-  if (!MYATT_MONTH) MYATT_MONTH = tod.slice(0, 7) < MYATT_MONTH_FLOOR ? MYATT_MONTH_FLOOR : tod.slice(0, 7);
-
-  if (bar && !bar.dataset.wired) {
-    // Months from the floor up through the current month, newest
-    // first — same convention as the Manager grid's Month Wise picker.
-    const monthOptions = [];
-    const [fy, fm] = MYATT_MONTH_FLOOR.split('-').map(Number);
-    const [ty, tm] = tod.slice(0, 7).split('-').map(Number);
-    const cur = new Date(ty, tm - 1, 1);
-    const floor = new Date(fy, fm - 1, 1);
-    while (cur >= floor) {
-      const key = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}`;
-      monthOptions.push({ key, label: cur.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }) });
-      cur.setMonth(cur.getMonth() - 1);
-    }
-
-    bar.innerHTML = `
-      <button id="myAttendR15" class="cp-btn-ghost">Last 15 Days</button>
-      <button id="myAttendRMonth" class="cp-btn-ghost">Month Wise</button>
-      <select id="myAttendMonthSelect" style="display:${MYATT_RANGE_MODE === 'month' ? '' : 'none'};
-        background:var(--surface2);border:1px solid var(--border);border-radius:6px;
-        color:var(--txt1);font-size:12px;padding:6px 8px;cursor:pointer;">
-        ${monthOptions.map(m => `<option value="${m.key}" ${m.key === MYATT_MONTH ? 'selected' : ''}>${m.label}</option>`).join('')}
-      </select>
-      <button id="myAttendExportPdf" style="background:var(--elevated);color:var(--txt1);border:1px solid var(--border-md);
-        border-radius:6px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:6px;">
-        ⬇ Export PDF
-      </button>`;
-    bar.dataset.wired = '1';
-    bar.querySelector('#myAttendR15').addEventListener('click', () => {
-      MYATT_RANGE_MODE = '15days';
-      bar.querySelector('#myAttendMonthSelect').style.display = 'none';
-      renderMyAttendanceGrid();
-    });
-    bar.querySelector('#myAttendRMonth').addEventListener('click', () => {
-      MYATT_RANGE_MODE = 'month';
-      bar.querySelector('#myAttendMonthSelect').style.display = '';
-      renderMyAttendanceGrid();
-    });
-    bar.querySelector('#myAttendMonthSelect').addEventListener('change', e => {
-      MYATT_MONTH = e.target.value;
-      renderMyAttendanceGrid();
-    });
-    bar.querySelector('#myAttendExportPdf').addEventListener('click', () => myAttendExportPDF());
-  }
-
-  // Ensure this employee's history is loaded — reuse the same cache
-  // My Projects populates, so switching tabs never double-fetches.
-  const haveCache = typeof MY_PROJECTS_CACHE !== 'undefined' && MY_PROJECTS_CACHE;
-  if (haveCache) { renderMyAttendanceGrid(); return; }
-
-  const wrap = document.getElementById('myAttendGridWrap');
-  if (wrap) wrap.innerHTML = `<div class="slot-loading"><div class="slot-spinner"></div><span>Loading…</span></div>`;
-  apiGetAllHistory(USER.id).then(history => {
-    if (typeof MY_PROJECTS_CACHE !== 'undefined') MY_PROJECTS_CACHE = history;
-    renderMyAttendanceGrid();
-  }).catch(err => {
-    if (wrap) wrap.innerHTML = `<div class="slot-error">Failed to load: ${err.message}</div>`;
-  });
-}
-
-// Same convention as getEmpDayStatus() in Client-Project.js: worked
-// takes priority, then Leave, then Holiday, then Weekend, then
-// No Entry — applied here against this employee's own entries only.
-function myAttendGetDayStatus(dateStr) {
-  const history    = (typeof MY_PROJECTS_CACHE !== 'undefined' && MY_PROJECTS_CACHE) || [];
-  const dayEntries = history.filter(e => e.date === dateStr);
-  const dow        = new Date(dateStr + 'T00:00:00').getDay(); // 0 = Sun, 6 = Sat
-  const isWeekend  = dow === 0 || dow === 6;
-  const hasLeave   = dayEntries.some(e => e.status === 'Leave');
-  const hasHoliday = dayEntries.some(e => e.status === 'Holiday');
-  const worked     = dayEntries.filter(e => e.status !== 'Leave' && e.status !== 'Holiday');
-
-  if (worked.length) {
-    const timesIn  = worked.map(e => e.timeIn).filter(Boolean).sort();
-    const timesOut = worked.map(e => e.timeOut).filter(Boolean).sort();
-    const hours    = worked.reduce((s, e) => s + (Number(e.hours) || 0), 0);
-    return {
-      kind: 'worked', hasLeave,
-      checkIn: timesIn[0] || null,
-      checkOut: timesOut[timesOut.length - 1] || null,
-      hours,
-      permissionHours: hours < MYATT_FULL_DAY_HOURS ? (MYATT_FULL_DAY_HOURS - hours) : 0,
-    };
-  }
-  if (hasLeave)   return { kind: 'leave' };
-  if (hasHoliday) return { kind: 'holiday' };
-  if (isWeekend)  return { kind: 'weekend' };
-  if (dateStr > todayStr()) return { kind: 'upcoming' };
-  return { kind: 'not_logged' };
-}
-
-function myAttendGetRangeDates() {
-  const tod = todayStr();
-  let from, to = tod;
-  if (MYATT_RANGE_MODE === 'month') {
-    const [y, m] = MYATT_MONTH.split('-').map(Number);
-    const lastDayOfMonth = toLocalDateStr(new Date(y, m, 0));
-    from = `${MYATT_MONTH}-01`;
-    to   = lastDayOfMonth > tod ? tod : lastDayOfMonth;
-  } else {
-    const d = new Date(tod + 'T00:00:00'); d.setDate(d.getDate() - 14);
-    from = toLocalDateStr(d);
-  }
-  const CAP = 31; // enough for a full month, still horizontally scrollable
-  const start = new Date(from + 'T00:00:00');
-  const end   = new Date(to + 'T00:00:00');
-  const totalDays = Math.max(1, Math.round((end - start) / 86400000) + 1);
-  const renderStart = totalDays > CAP ? new Date(end.getTime() - (CAP - 1) * 86400000) : start;
-
+// 'anchor' -> that date plus the 6 before it, most recent first.
+function getEmpDashRecentDays(anchor, count) {
   const dates = [];
-  for (let d = new Date(renderStart); d <= end; d.setDate(d.getDate() + 1)) dates.push(toLocalDateStr(d));
+  const base = new Date(anchor + 'T00:00:00');
+  for (let i = 0; i < count; i++) {
+    const d = new Date(base);
+    d.setDate(d.getDate() - i);
+    dates.push(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`);
+  }
   return dates;
 }
 
-function myAttendBuildListRow(dateStr, status, isLast) {
-  const dateLabel = esc(new Date(dateStr + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }));
-  const rowStyle = `padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;${isLast ? '' : 'border-bottom:1px solid var(--border);'}`;
+const EMP_DASH_RECENT_DAYS_COUNT = 7;
 
-  if (status.kind === 'worked') {
-    const timeLine = (status.checkIn && status.checkOut)
-      ? `${esc(fmtMyProj12(status.checkIn))} → ${esc(fmtMyProj12(status.checkOut))}`
-      : '—';
-    const leaveTag = status.hasLeave ? ` 🏖` : '';
-    const permHtml = status.permissionHours > 0
-      ? `<span style="margin-left:10px;font-size:11px;font-weight:700;color:#a78bfa;">Permission ${esc(fmtMyProjHours(status.permissionHours))}</span>`
-      : '';
-    const otHtml = status.hours > MYATT_OVERTIME_THRESHOLD_HOURS
-      ? ` <span title="Past ${esc(fmtMyProjHours(MYATT_OVERTIME_THRESHOLD_HOURS))}" style="display:inline-block;font-size:.62rem;font-weight:700;color:#92400e;background:#fde68a;border-radius:5px;padding:1px 5px;margin-left:4px;vertical-align:middle;">⚡ OT +${esc(fmtMyProjHours(status.hours - MYATT_OVERTIME_THRESHOLD_HOURS))}</span>`
-      : '';
+function buildLast5DaysSection(anchor) {
+  const dates = getEmpDashRecentDays(anchor, EMP_DASH_RECENT_DAYS_COUNT);
+
+  const rows = dates.map(dateStr => {
+    const dayEntries = EMP_DASH_FULL_HISTORY.filter(e => e.date === dateStr && e.status !== 'Leave' && e.project);
+    const totalHours = dayEntries.reduce((s, e) => s + Number(e.hours || 0), 0);
+    const byProj = {};
+    dayEntries.forEach(e => { byProj[e.project] = (byProj[e.project] || 0) + Number(e.hours || 0); });
+    const segs = Object.entries(byProj).map(([name, hours]) => ({ name, hours })).sort((a, b) => b.hours - a.hours);
+
+    const label = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+
+    if (!totalHours) {
+      return `
+        <div style="padding:10px 0;border-bottom:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <span style="font-size:13px;font-weight:700;color:var(--txt1);">${esc(label)}</span>
+            <span style="font-size:13px;color:var(--txt2,var(--muted));">—</span>
+          </div>
+          <div style="font-size:11px;color:var(--txt2,var(--muted));margin-top:2px;">No entries</div>
+        </div>`;
+    }
+
+    // The bar's full track length is a fixed 9-hour scale (the same
+    // OT threshold used elsewhere), NOT each day's own total — so a
+    // 3h day and a 9h day are visibly different lengths, instead of
+    // every day always looking 100% full regardless of actual hours.
+    // A project keeps its own color on the bar at all times —
+    // including on an OT day — so the same project never appears in
+    // two different colors depending on the day. OT itself is
+    // signaled only by the "· OT" text label next to the hours, not
+    // by recoloring the bar.
+    const otThreshold = typeof OVERTIME_THRESHOLD_HOURS === 'number' ? OVERTIME_THRESHOLD_HOURS : 9;
+    const fillPct = Math.min((totalHours / otThreshold) * 100, 100);
+    const isOTDay = totalHours >= otThreshold;
+
+    const barHtml = segs.map(seg => {
+      const pct = (seg.hours / totalHours) * fillPct;
+      return `<div style="width:${pct}%;height:100%;background:${empDashProjectColor(seg.name)};" title="${esc(seg.name)}: ${esc(fh(seg.hours))}"></div>`;
+    }).join('');
+
+    const chips = segs.map(seg => {
+      const dotColor = empDashProjectColor(seg.name);
+      return `
+      <span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--txt2,var(--muted));margin:4px 10px 0 0;">
+        <span style="width:7px;height:7px;border-radius:50%;background:${dotColor};flex-shrink:0;"></span>
+        <strong style="color:var(--txt1);">${esc(seg.name)}</strong> ${esc(fh(seg.hours))}
+      </span>`;
+    }).join('');
+
     return `
-      <div style="${rowStyle}">
-        <span style="flex:0 0 110px;font-size:12.5px;font-weight:700;color:var(--txt1);">${dateLabel}</span>
-        <span style="flex:1;min-width:140px;font-size:12px;color:var(--txt2);">${timeLine}${leaveTag}</span>
-        <span style="font-size:13px;font-weight:800;color:#34d399;white-space:nowrap;">${esc(fmtMyProjHours(status.hours))}${otHtml}${permHtml}</span>
+      <div style="padding:10px 0;border-bottom:1px solid var(--border);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+          <span style="font-size:13px;font-weight:700;color:var(--txt1);">${esc(label)}</span>
+          <span style="font-size:13px;font-weight:700;color:${isOTDay ? '#92400e' : 'var(--a1)'};">${esc(fh(totalHours))}${isOTDay ? ' · OT' : ''}</span>
+        </div>
+        <div style="height:6px;border-radius:4px;overflow:hidden;background:var(--surface2,#20242e);display:flex;">${barHtml}</div>
+        <div>${chips}</div>
       </div>`;
-  }
-  const STATUS_STYLE = {
-    leave:      { label: 'Leave',    color: '#fbbf24' },
-    holiday:    { label: 'Holiday',  color: '#60a5fa' },
-    weekend:    { label: 'Weekend',  color: 'var(--txt2)' },
-    not_logged: { label: 'No Entry', color: '#f87171' },
-    upcoming:   { label: '·',        color: 'var(--txt2)' },
-  };
-  const s = STATUS_STYLE[status.kind] || STATUS_STYLE.not_logged;
-  return `
-    <div style="${rowStyle}">
-      <span style="flex:0 0 110px;font-size:12.5px;font-weight:700;color:var(--txt1);">${dateLabel}</span>
-      <span style="flex:1;min-width:140px;font-size:12px;color:${s.color};font-weight:700;">${esc(s.label)}</span>
-      <span style="font-size:12px;color:${s.color};">—</span>
-    </div>`;
-}
-
-function renderMyAttendanceGrid() {
-  const wrap = document.getElementById('myAttendGridWrap');
-  const bar  = document.getElementById('myAttendRangeBar');
-  if (!wrap) return;
-
-  if (bar) {
-    bar.querySelector('#myAttendR15').style.cssText    = MYATT_RANGE_MODE === '15days' ? 'background:var(--a1);color:#fff;border-color:var(--a1);' : '';
-    bar.querySelector('#myAttendRMonth').style.cssText = MYATT_RANGE_MODE === 'month'  ? 'background:var(--a1);color:#fff;border-color:var(--a1);' : '';
-  }
-
-  const dates = myAttendGetRangeDates();
-
-  // Same totals the Manager Attendance grid keeps per employee
-  // (leaveDays/workingDays/totalHours/permissionHours) — computed
-  // here across the visible range so Leave days are visible even
-  // when they don't happen to fall in view row-by-row.
-  let leaveDays = 0, workingDays = 0, totalHours = 0, permissionHours = 0;
-  const statuses = dates.map(d => ({ date: d, status: myAttendGetDayStatus(d) }));
-  statuses.forEach(({ status }) => {
-    if (status.kind === 'worked') {
-      workingDays++;
-      totalHours += status.hours;
-      permissionHours += status.permissionHours || 0;
-      if (status.hasLeave) leaveDays++;
-    } else if (status.kind === 'leave') {
-      leaveDays++;
-    }
-  });
-
-  const summaryHtml = `
-    <div style="display:flex;gap:22px;flex-wrap:wrap;background:var(--surface1);border:1px solid var(--border);
-      border-radius:12px;padding:.9rem 1.1rem;margin-bottom:.9rem;">
-      <div>
-        <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;">Leave Days</div>
-        <div style="font-size:14px;font-weight:700;color:${leaveDays > 0 ? '#fbbf24' : 'var(--txt1)'};">${leaveDays}</div>
-      </div>
-      <div>
-        <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;">Permission Hrs</div>
-        <div style="font-size:14px;font-weight:700;color:${permissionHours > 0 ? '#a78bfa' : 'var(--txt1)'};">${permissionHours > 0 ? esc(fmtMyProjHours(permissionHours)) : '—'}</div>
-      </div>
-      <div>
-        <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;">Working Days</div>
-        <div style="font-size:14px;font-weight:700;color:var(--txt1);">${workingDays}</div>
-      </div>
-      <div>
-        <div style="font-size:9.5px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;">Total Hours</div>
-        <div style="font-size:14px;font-weight:700;color:var(--a1);">${esc(fmtMyProjHours(totalHours))}</div>
-      </div>
-    </div>`;
-
-  // Most recent date first — same convention as the Daily Notes list
-  // on the My Projects detail page.
-  const rowsHtml = statuses.slice().reverse().map(({ date, status }, i) =>
-    myAttendBuildListRow(date, status, i === statuses.length - 1)
-  ).join('');
-  wrap.innerHTML = `
-    ${summaryHtml}
-    <div style="background:var(--surface1);border:1px solid var(--border);border-radius:12px;padding:.4rem .4rem;">
-      ${rowsHtml}
-    </div>`;
-}
-
-// Opens a print-ready window with this employee's own attendance for
-// the currently-selected range (Last 15 Days / Month Wise) — same
-// window.open + window.print() pattern as the Manager/HR Attendance
-// grid's exportAttendanceToPDF() in Client-Project-Attendance.js, ​
-// just built from a plain Date/Status/Time/Hours table instead of
-// that grid's wide date-columns layout, since My Attendance is
-// already a vertical list rather than a calendar grid. Re-derives
-// the same dates/status/totals renderMyAttendanceGrid() just used —
-// cheap (pure functions over the already-loaded MY_PROJECTS_CACHE),
-// so no need to stash them on a module-level variable.
-function myAttendExportPDF() {
-  const dates = myAttendGetRangeDates();
-  if (!dates.length) { toast?.('e', 'Nothing to export', 'No dates in the current range.'); return; }
-
-  let leaveDays = 0, workingDays = 0, totalHours = 0, permissionHours = 0, overtimeHours = 0;
-  const statuses = dates.map(d => ({ date: d, status: myAttendGetDayStatus(d) }));
-  statuses.forEach(({ status }) => {
-    if (status.kind === 'worked') {
-      workingDays++;
-      totalHours += status.hours;
-      permissionHours += status.permissionHours || 0;
-      if (status.hours > MYATT_OVERTIME_THRESHOLD_HOURS) overtimeHours += (status.hours - MYATT_OVERTIME_THRESHOLD_HOURS);
-      if (status.hasLeave) leaveDays++;
-    } else if (status.kind === 'leave') {
-      leaveDays++;
-    }
-  });
-
-  const STATUS_LABEL = { leave: 'Leave', holiday: 'Holiday', weekend: 'Weekend', not_logged: 'No Entry', upcoming: '—' };
-  const rangeLabel = MYATT_RANGE_MODE === 'month'
-    ? new Date(MYATT_MONTH + '-01T00:00:00').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })
-    : 'Last 15 Days';
-
-  const rowsHtml = statuses.slice().reverse().map(({ date, status }) => {
-    const dateLabel = new Date(date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
-    if (status.kind === 'worked') {
-      const timeLine = (status.checkIn && status.checkOut) ? `${fmtMyProj12(status.checkIn)} → ${fmtMyProj12(status.checkOut)}` : '—';
-      const ot = status.hours > MYATT_OVERTIME_THRESHOLD_HOURS ? ` (OT +${fmtMyProjHours(status.hours - MYATT_OVERTIME_THRESHOLD_HOURS)})` : '';
-      const leaveTag = status.hasLeave ? ' 🏖' : '';
-      return `<tr><td>${esc(dateLabel)}</td><td>${esc(timeLine)}${leaveTag}</td><td>${esc(fmtMyProjHours(status.hours))}${esc(ot)}</td></tr>`;
-    }
-    return `<tr><td>${esc(dateLabel)}</td><td>${esc(STATUS_LABEL[status.kind] || 'No Entry')}</td><td>—</td></tr>`;
   }).join('');
 
-  const printWindow = window.open('', '_blank');
-  if (!printWindow) { toast?.('e', 'Could not open print preview', 'Your browser may have blocked the pop-up.'); return; }
-
-  const empName = (typeof USER !== 'undefined' && USER && USER.name) || '';
-  const empId   = (typeof USER !== 'undefined' && USER && USER.id)   || '';
-
-  printWindow.document.write(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <title>My Attendance — ${esc(rangeLabel)}</title>
-      <style>
-        * { box-sizing: border-box; }
-        body { font-family: Arial, Helvetica, sans-serif; color: #111; margin: 0; padding: 20px; }
-        h1 { font-size: 16px; margin: 0 0 2px; }
-        .sub { font-size: 11px; color: #555; margin-bottom: 14px; }
-        .summary { display: flex; gap: 24px; margin-bottom: 16px; }
-        .summary div span { display: block; }
-        .summary .label { font-size: 9px; color: #777; text-transform: uppercase; letter-spacing: .4px; }
-        .summary .value { font-size: 14px; font-weight: 700; margin-top: 2px; }
-        table { border-collapse: collapse; width: 100%; font-size: 11px; }
-        th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }
-        th { background: #f0f0f0; text-transform: uppercase; font-size: 9px; color: #333; }
-      </style>
-    </head>
-    <body>
-      <h1>Attendance Report</h1>
-      <div class="sub">${esc(empName)}${empId ? ' (' + esc(empId) + ')' : ''} · ${esc(rangeLabel)} · Generated ${new Date().toLocaleString('en-IN')}</div>
-      <div class="summary">
-        <div><span class="label">Leave Days</span><span class="value">${leaveDays}</span></div>
-        <div><span class="label">Permission Hrs</span><span class="value">${permissionHours > 0 ? esc(fmtMyProjHours(permissionHours)) : '—'}</span></div>
-        <div><span class="label">Working Days</span><span class="value">${workingDays}</span></div>
-        <div><span class="label">Total Hours</span><span class="value">${esc(fmtMyProjHours(totalHours))}</span></div>
-        <div><span class="label">OT Hours</span><span class="value">${overtimeHours > 0 ? esc(fmtMyProjHours(overtimeHours)) : '—'}</span></div>
+  return `
+    <div class="cp-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.75rem;flex-wrap:wrap;gap:8px;">
+        <div style="font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--txt2,var(--muted));">Last ${EMP_DASH_RECENT_DAYS_COUNT} Days</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="date" id="empDashAnchorDate" value="${esc(anchor)}" max="${esc(todayStr())}"
+            style="background:var(--surface2,#20242e);border:1px solid var(--border);border-radius:6px;
+            color:var(--txt1);font-size:12px;padding:6px 8px;"/>
+          <button id="empDashViewAttendanceBtn" class="rbtn" style="white-space:nowrap;">View Attendance →</button>
+        </div>
       </div>
-      <table>
-        <thead><tr><th>Date</th><th>Check In → Out</th><th>Hours</th></tr></thead>
-        <tbody>${rowsHtml}</tbody>
-      </table>
-    </body>
-    </html>
-  `);
-  printWindow.document.close();
-  printWindow.focus();
-  printWindow.onload = () => printWindow.print();
-  setTimeout(() => { if (!printWindow.closed) printWindow.print(); }, 400); // fallback in case onload doesn't fire in time
+      ${rows}
+    </div>`;
 }
 
-function fmtMyProjDate(dateStr) {
-  if (!dateStr) return '—';
-  const d = new Date(dateStr + 'T00:00:00');
-  if (isNaN(d.getTime())) return '—';
-  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+function buildAllTimeProjectsSection() {
+  const byProj = {}; // name -> { hours, days:Set }
+  EMP_DASH_FULL_HISTORY
+    .filter(e => e.status !== 'Leave' && e.project)
+    .forEach(e => {
+      if (!byProj[e.project]) byProj[e.project] = { hours: 0, days: new Set() };
+      byProj[e.project].hours += Number(e.hours || 0);
+      byProj[e.project].days.add(e.date);
+    });
+
+  const list = Object.entries(byProj)
+    .map(([name, d]) => ({ name, hours: d.hours, days: d.days.size }))
+    .sort((a, b) => b.hours - a.hours);
+
+  const header = `<div style="font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--txt2,var(--muted));margin-bottom:.9rem;">My Projects — All Time</div>`;
+
+  if (!list.length) {
+    return `<div class="cp-card">${header}<div style="font-size:12px;color:var(--txt2,var(--muted));">No hours logged yet.</div></div>`;
+  }
+
+  const maxHours = Math.max(...list.map(x => x.hours), 0.01);
+  const bars = list.map(x => {
+    const pct = Math.max((x.hours / maxHours) * 100, 4);
+    return `
+      <div style="display:flex;flex-direction:column;align-items:center;width:76px;flex-shrink:0;">
+        <div style="height:110px;width:22px;display:flex;align-items:flex-end;background:var(--surface2,#20242e);border-radius:6px;overflow:hidden;">
+          <div style="width:100%;height:${pct}%;background:${empDashProjectColor(x.name)};"></div>
+        </div>
+        <div style="font-size:11px;font-weight:700;color:var(--txt1);margin-top:8px;text-align:center;
+          overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:76px;" title="${esc(x.name)}">${esc(x.name)}</div>
+        <div style="font-size:10px;color:var(--txt2,var(--muted));">${esc(fh(x.hours))}</div>
+        <div style="font-size:10px;color:var(--txt2,var(--muted));">${x.days} day${x.days !== 1 ? 's' : ''}</div>
+      </div>`;
+  }).join('');
+
+  return `<div class="cp-card">${header}<div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:4px;">${bars}</div></div>`;
 }
 
-function fmtMyProjHours(h) {
-  const totalMins = Math.round(Number(h) * 60);
-  const hrs  = Math.floor(totalMins / 60);
-  const mins = totalMins % 60;
-  if (hrs === 0)  return mins + 'm';
-  if (mins === 0) return hrs + 'h';
-  return hrs + 'h ' + mins + 'm';
+// One project's card: name/client/status, this employee's own hours
+// on it (their own number — not project-wide, and not cost), and the
+// green/red budget bar. The bar itself is whole-project cost vs
+// Constant — same signal a Team Leader sees, same total absence of
+// any number on it.
+// This employee's own cost contribution to a project — their own
+// hours each month × their OWN Points for that month, summed. Uses
+// only this employee's data (USER.id/USER.name), never anyone
+// else's — safe to show alongside the project-wide total, since it
+// reveals nothing about a teammate's pay.
+function getMyProjectCost(p) {
+  const byMonth = {};
+  EMP_DASH_FULL_HISTORY.forEach(e => {
+    if (e.project !== p.projectName || e.status === 'Leave' || !e.date) return;
+    const month = e.date.slice(0, 7);
+    byMonth[month] = (byMonth[month] || 0) + Number(e.hours || 0);
+  });
+
+  let cost = 0;
+  Object.entries(byMonth).forEach(([month, hrs]) => {
+    cost += hrs * getMonthlyPointsForEmployee(USER.id, month, USER.name);
+  });
+  return cost;
+}
+
+function buildEmpDashboardCard(p) {
+  const client = CP_CLIENTS.find(c => c.id === p.clientId);
+
+  let totalCost = 0;
+  try {
+    totalCost = getProjectCostBreakdown(p).totalCost;
+  } catch (err) {
+    console.warn('[myprojects-tab] Cost calc failed for', p.projectId, ':', err.message);
+  }
+
+  let myCost = 0;
+  try {
+    myCost = getMyProjectCost(p);
+  } catch (err) {
+    console.warn('[myprojects-tab] My-cost calc failed for', p.projectId, ':', err.message);
+  }
+
+  const budget = parseFloat(p.projectConstant) || 0;
+  const hasBudget = budget > 0;
+  const isOverBudget = hasBudget && totalCost > budget;
+  const fillPct = hasBudget
+    ? Math.min((totalCost / budget) * 100, 100)
+    : (totalCost > 0 ? 100 : 0);
+
+  let barHtml, labelText, labelColor;
+  if (!totalCost) {
+    barHtml = `<div style="width:100%;height:100%;background:var(--border-md,#3a3f4b);"></div>`;
+    labelText = 'No hours logged yet';
+    labelColor = 'var(--txt1,var(--fg))';
+  } else if (isOverBudget) {
+    barHtml = `<div style="width:100%;height:100%;background:#f87171;"></div>`;
+    labelText = 'Over budget';
+    labelColor = '#f87171';
+  } else {
+    barHtml = `<div style="width:${fillPct}%;height:100%;background:#34d399;"></div>`;
+    labelText = hasBudget ? 'Within budget' : 'No budget set';
+    labelColor = hasBudget ? '#34d399' : 'var(--txt1,var(--fg))';
+  }
+
+  const myHours = EMP_DASH_FULL_HISTORY
+    .filter(e => e.project === p.projectName && e.status !== 'Leave')
+    .reduce((s, e) => s + Number(e.hours || 0), 0);
+
+  // Totals: Constant, total project cost, Profit/Loss (project-wide,
+  // no names) — plus "Your Cost", this employee's own share, which
+  // is entirely their own data and reveals nothing about teammates.
+  const profit = budget - totalCost;
+  const isProfit = profit >= 0;
+  const moneyFmt = typeof fmtCPMoney === 'function' ? fmtCPMoney : (n => Math.round(Number(n) || 0).toLocaleString('en-IN'));
+
+  const totalsHtml = `
+    <div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:.6rem;font-size:11px;">
+      <div><span style="color:var(--muted);">Constant:</span> <strong style="color:var(--txt1);">${hasBudget ? esc(moneyFmt(budget)) : 'Not set'}</strong></div>
+      <div><span style="color:var(--muted);">Cost:</span> <strong style="color:var(--txt1);">${esc(moneyFmt(totalCost))}</strong></div>
+      ${hasBudget ? `<div><span style="color:var(--muted);">${isProfit ? 'Profit' : 'Loss'}:</span> <strong style="color:${isProfit ? '#34d399' : '#f87171'};">${esc(moneyFmt(Math.abs(profit)))}</strong></div>` : ''}
+      <div><span style="color:var(--muted);">Your Cost:</span> <strong style="color:#4f8ef7;">${esc(moneyFmt(myCost))}</strong></div>
+    </div>`;
+
+  return `
+    <div class="cp-entity-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:.6rem;flex-wrap:wrap;">
+        <div style="min-width:0;">
+          <div class="cp-entity-name" style="font-size:14px;">${esc(p.projectName || p.projectId)}</div>
+          <div class="cp-entity-id">${esc(p.projectId)} · ${esc(client?.name || p.clientId || '—')}</div>
+        </div>
+        <span class="cp-status-pill" style="background:rgba(79,142,247,0.12);color:#4f8ef7;flex-shrink:0;">${esc(p.status || 'In Progress')}</span>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:.6rem;">Your hours on this project: <strong>${esc(fh(myHours))}</strong></div>
+      ${totalsHtml}
+      <div style="font-size:9px;font-weight:700;margin-bottom:4px;color:${labelColor};">${labelText}</div>
+      <div style="height:6px;background:var(--surface2,#20242e);border-radius:4px;overflow:hidden;">${barHtml}</div>
+    </div>`;
+}
+
+// ══════════════════════════════════════════════════════════════
+// MY ATTENDANCE — read-only, day-by-day: date, status, check-in/out,
+// hours worked. Reuses STATUS_META and getDayStatus from
+// emp-detail.js (already global, loaded on every portal) for the
+// exact same status colors/labels the Manager/TL views use — but
+// this is deliberately read-only: no resolution buttons (Force
+// Leave/Force Entry/Holiday), since those are manager actions on
+// OTHER people's timesheets, not something an employee does to
+// their own.
+// ══════════════════════════════════════════════════════════════
+
+function computeAttendanceRange() {
+  const today = todayStr();
+
+  if (EMP_ATTEND_RANGE === 'month') {
+    const fromDate = EMP_ATTEND_MONTH + '-01';
+    const toDate = (EMP_ATTEND_MONTH === today.slice(0, 7))
+      ? today
+      : (typeof lastDayOfMonthStr_ === 'function' ? lastDayOfMonthStr_(EMP_ATTEND_MONTH) : today);
+    return { fromDate, toDate };
+  }
+
+  // 'last15' — default
+  const d = new Date();
+  d.setDate(d.getDate() - 14);
+  const fromDate = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return { fromDate, toDate: today };
+}
+
+// Every calendar date from fromDate to toDate inclusive, most recent
+// first — including days with no entries at all, so a missed day is
+// visible rather than silently skipped.
+function buildDateRangeArray(fromDate, toDate) {
+  const dates = [];
+  const cur = new Date(fromDate + 'T00:00:00');
+  const end = new Date(toDate + 'T00:00:00');
+  while (cur <= end) {
+    dates.push(`${cur.getFullYear()}-${pad(cur.getMonth() + 1)}-${pad(cur.getDate())}`);
+    cur.setDate(cur.getDate() + 1);
+  }
+  return dates.reverse();
+}
+
+async function renderMyAttendanceTab() {
+  const rangeBar = $('myAttendRangeBar');
+  const gridWrap = $('myAttendGridWrap');
+  if (!gridWrap) return;
+
+  if (rangeBar) {
+    const isMonth = EMP_ATTEND_RANGE === 'month';
+    rangeBar.innerHTML = `
+      <button class="rbtn ${EMP_ATTEND_RANGE === 'last15' ? 'active' : ''}" data-range="last15">Last 15 Days</button>
+      <button class="rbtn ${isMonth ? 'active' : ''}" data-range="month">Select Month</button>
+      ${isMonth ? `<input type="month" id="empAttendMonthPicker" value="${esc(EMP_ATTEND_MONTH)}" max="${esc(todayStr().slice(0, 7))}"
+        style="margin-left:4px;background:var(--surface2,#20242e);border:1px solid var(--border);border-radius:6px;
+        color:var(--txt1);font-size:12px;padding:6px 8px;"/>` : ''}`;
+
+    if (!rangeBar.dataset.wired) {
+      rangeBar.dataset.wired = '1';
+      rangeBar.addEventListener('click', e => {
+        const btn = e.target.closest('button[data-range]');
+        if (!btn) return;
+        EMP_ATTEND_RANGE = btn.dataset.range;
+        renderMyAttendanceTab();
+      });
+      rangeBar.addEventListener('change', e => {
+        if (e.target.id === 'empAttendMonthPicker') {
+          EMP_ATTEND_MONTH = e.target.value || todayStr().slice(0, 7);
+          renderMyAttendanceTab();
+        }
+      });
+    }
+  }
+
+  gridWrap.innerHTML = `<div class="slot-loading"><div class="slot-spinner"></div><span>Loading…</span></div>`;
+
+  try {
+    await ensureEmpFullHistoryLoaded();
+  } catch (err) {
+    gridWrap.innerHTML = `<div class="slot-error">Failed to load your attendance: ${esc(err.message)}</div>`;
+    return;
+  }
+
+  if (typeof ensureCPStyles === 'function') ensureCPStyles(); // for .cp-card
+
+  const { fromDate, toDate } = computeAttendanceRange();
+  const dates = buildDateRangeArray(fromDate, toDate);
+
+  const byDate = {};
+  EMP_DASH_FULL_HISTORY.forEach(e => {
+    if (!e.date) return;
+    if (!byDate[e.date]) byDate[e.date] = [];
+    byDate[e.date].push(e);
+  });
+
+  const rows = dates.map(dateStr => buildEmpAttendanceRow(dateStr, byDate[dateStr] || [])).join('');
+  gridWrap.innerHTML = `<div class="cp-card">${rows}</div>`;
+}
+
+function buildEmpAttendanceRow(dateStr, dayEntries) {
+  const statusKey = typeof getDayStatus === 'function'
+    ? getDayStatus(dateStr, dayEntries)
+    : (dayEntries.length ? 'worked' : 'not_logged');
+
+  const worked = dayEntries.filter(e => e.status !== 'Leave');
+  const totalHours = worked.reduce((s, e) => s + Number(e.hours || 0), 0);
+
+  let meta = (typeof STATUS_META !== 'undefined' && STATUS_META[statusKey])
+    || { icon: '', label: statusKey, fg: 'var(--txt1)', bg: 'var(--surface2)' };
+
+  // Worked days get a more specific label based on hours — same 9h
+  // threshold table.js already uses for its own OT badge
+  // (OVERTIME_THRESHOLD_HOURS), so "OT" here means the same thing it
+  // does on the Timesheet tab. Leave/Holiday/Not Logged/etc. are left
+  // exactly as STATUS_META defines them.
+  if (statusKey === 'worked') {
+    const otThreshold = typeof OVERTIME_THRESHOLD_HOURS === 'number' ? OVERTIME_THRESHOLD_HOURS : 9;
+    if (totalHours >= otThreshold) {
+      meta = { icon: '⚡', label: `OT · ${fh(totalHours)}`, fg: '#92400e', bg: 'rgba(251,191,36,0.18)' };
+    } else if (totalHours > 0) {
+      meta = { icon: '🔵', label: `Permission · ${fh(totalHours)}`, fg: '#4f8ef7', bg: 'rgba(79,142,247,0.12)' };
+    }
+  }
+
+  const label = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-IN',
+    { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+
+  const timeIns  = worked.map(e => e.timeIn).filter(Boolean).sort();
+  const timeOuts = worked.map(e => e.timeOut).filter(Boolean).sort();
+  const checkIn  = timeIns[0] || null;
+  const checkOut = timeOuts[timeOuts.length - 1] || null;
+
+  const checkTimesHtml = (checkIn || checkOut)
+    ? `<span style="font-size:11px;color:var(--txt2,var(--muted));white-space:nowrap;">
+         <b style="color:var(--txt1);">${esc(checkIn || '—')}</b> → <b style="color:var(--txt1);">${esc(checkOut || '—')}</b>
+       </span>`
+    : '';
+
+  return `
+    <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);flex-wrap:wrap;">
+      <span style="font-size:13px;font-weight:700;color:var(--txt1);min-width:170px;">${esc(label)}</span>
+      <span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px;
+        background:${meta.bg};color:${meta.fg};white-space:nowrap;">${meta.icon} ${esc(meta.label)}</span>
+      ${checkTimesHtml}
+      <div style="flex:1;"></div>
+      <span style="font-size:13px;font-weight:700;color:var(--txt1);white-space:nowrap;">${totalHours > 0 ? esc(fh(totalHours)) : '—'}</span>
+    </div>`;
 }
