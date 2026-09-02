@@ -489,15 +489,10 @@ tr:hover .del-btn{opacity:1}
 @media(max-width:640px){
   .main{padding:1.1rem .9rem}.bar{padding:0 .9rem}
   #mgrPortal .main,#tlPortal .main,#hrPortal .main{padding:1.1rem .9rem}
-  /* My Dashboard's project cards are given an inline
-     grid-template-columns (set from myprojects-tab.js, so it can use
-     the extra width on a PC screen) that relies on a
-     minmax(min(440px,100%),1fr) trick to collapse to one column on a
-     narrow screen. That trick doesn't reliably resolve on every real
-     browser/device — percentages inside an auto-fill repeat() are a
-     known CSS edge case — so this forces it with !important instead,
-     which always wins regardless of what the inline style computed to. */
-  .cp-card-grid{grid-template-columns:1fr!important;}
+  /* My Dashboard's project cards are now minimal (icon, name, one
+     status line — no dense figures), so a 2-column grid reads cleanly
+     on a phone instead of needing to collapse to one column. */
+  .cp-card-grid{grid-template-columns:repeat(2,1fr)!important;gap:10px!important;}
   .fcard{padding:1.1rem}.ptitle{font-size:1.25rem}
   .frow{grid-template-columns:1fr}.strip{flex-wrap:wrap}
   .sitem{border-right:none;border-bottom:1px solid var(--border);flex:1 1 45%}

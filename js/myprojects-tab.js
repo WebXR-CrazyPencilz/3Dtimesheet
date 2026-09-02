@@ -32,6 +32,7 @@ let EMP_DASH_ANCHOR_DATE = todayStr(); // end date for the "Last 5 Days" section
 let EMP_DASHBOARD_RENDERED_FOR = null; // USER.id this was already rendered for, so it fires exactly once per login
 let EMP_ATTEND_RANGE = 'last15'; // 'last15' | 'month' — My Attendance tab's selected range
 let EMP_ATTEND_MONTH = todayStr().slice(0, 7); // 'YYYY-MM' — used only when EMP_ATTEND_RANGE === 'month'
+let EMP_DASH_PROJECT_BY_NAME = {}; // rebuilt on every render — name -> project object, for the detail page lookup
 
 // ENTRIES (loaded by auth.js at login) is capped to the last 10 days
 // by the backend (see Code.gs getHistory) — fine for the Timesheet
@@ -179,11 +180,11 @@ function buildEmpUnmatchedProjectCard(name) {
   // No real Project Master row exists for this name, so there's no
   // clientId/status/Constant to draw from — but getProjectCostBreakdown
   // and getMyProjectCost only need a projectName to match Timesheet
-  // entries against, so the points figures still work fine. Building a
-  // minimal synthetic project object and reusing buildEmpDashboardCard
-  // directly means this gets the EXACT same bar behavior as a real
-  // project with no budget set (a full green bar), instead of no bar
-  // at all — and the same Points/Your Points figures.
+  // entries against, so the points figures still work fine (computed
+  // inside the detail page). Building a minimal synthetic project
+  // object and reusing buildEmpDashboardCard means this gets the
+  // exact same minimal card + tap-through detail page as a real
+  // project.
   const pseudoProject = { projectId: '', projectName: name, clientId: '', status: '', projectConstant: 0 };
   return buildEmpDashboardCard(pseudoProject, { unmatched: true });
 }
@@ -231,17 +232,29 @@ async function renderMyDashboardTab() {
     </div>`;
 
   const hasAnyCards = myProjects.length > 0 || unmatchedNames.length > 0;
+
+  // Name -> project object, covering both real Project Master rows
+  // and the synthetic pseudo-projects for unmatched names — lets
+  // openEmpProjectDetailPage look up full project data (Constant,
+  // dates, status) from just the name stored on the card's
+  // data-project attribute, regardless of which kind it is.
+  EMP_DASH_PROJECT_BY_NAME = {};
+  myProjects.forEach(p => { EMP_DASH_PROJECT_BY_NAME[p.projectName] = p; });
+  unmatchedNames.forEach(name => {
+    EMP_DASH_PROJECT_BY_NAME[name] = { projectId: '', projectName: name, clientId: '', status: '', projectConstant: 0, __unmatched: true };
+  });
+
   const projectsHtml = hasAnyCards
-    ? `<div class="cp-card-grid" style="grid-template-columns:repeat(auto-fill,minmax(min(440px,100%),1fr));">
-        ${myProjects.map(buildEmpDashboardCard).join('')}
+    ? `<div class="cp-card-grid" style="grid-template-columns:repeat(auto-fill,minmax(min(220px,100%),1fr));">
+        ${myProjects.map(p => buildEmpDashboardCard(p)).join('')}
         ${unmatchedNames.map(buildEmpUnmatchedProjectCard).join('')}
       </div>`
     : `<div class="chart-empty">You haven't logged hours on any project yet.</div>`;
 
   container.innerHTML = statsHtml + projectsHtml;
 
-  container.querySelectorAll('.emp-proj-view-btn').forEach(btn => {
-    btn.addEventListener('click', () => openEmpProjectDetailPage(btn.dataset.project));
+  container.querySelectorAll('.emp-proj-card').forEach(card => {
+    card.addEventListener('click', () => openEmpProjectDetailPage(card.dataset.project));
   });
 
   $('empDashAnchorDate')?.addEventListener('change', e => {
@@ -478,6 +491,13 @@ function getMyProjectCost(p) {
   return cost;
 }
 
+// Minimal, tap-through card — icon, name, client, hours, and a single
+// budget-status line. All the dense figures (Constant, Points Used,
+// Profit/Loss, Your Points, Start/End dates) live on the detail page
+// now instead of being crammed onto the card itself — this is what
+// makes a clean 2-column mobile grid possible; the old version tried
+// to fit a small dashboard's worth of numbers into each card, which
+// is what made it look cramped next to a sparser reference design.
 function buildEmpDashboardCard(p, opts = {}) {
   const client = CP_CLIENTS.find(c => c.id === p.clientId);
 
@@ -488,113 +508,107 @@ function buildEmpDashboardCard(p, opts = {}) {
     console.warn('[myprojects-tab] Cost calc failed for', p.projectId, ':', err.message);
   }
 
-  let myCost = 0;
-  try {
-    myCost = getMyProjectCost(p);
-  } catch (err) {
-    console.warn('[myprojects-tab] My-cost calc failed for', p.projectId, ':', err.message);
-  }
-
   const budget = parseFloat(p.projectConstant) || 0;
   const hasBudget = budget > 0;
   const isOverBudget = hasBudget && totalCost > budget;
-  const fillPct = hasBudget
-    ? Math.min((totalCost / budget) * 100, 100)
-    : (totalCost > 0 ? 100 : 0);
 
-  let barHtml, labelText, labelColor;
+  let labelText, labelColor, labelBg;
   if (!totalCost) {
-    barHtml = `<div style="width:100%;height:100%;background:var(--border-md,#3a3f4b);"></div>`;
     labelText = 'No hours logged yet';
-    labelColor = 'var(--txt1,var(--fg))';
+    labelColor = 'var(--txt2,var(--muted))';
+    labelBg = 'var(--surface2,#20242e)';
   } else if (isOverBudget) {
-    barHtml = `<div style="width:100%;height:100%;background:#f87171;"></div>`;
     labelText = 'Over budget';
     labelColor = '#f87171';
+    labelBg = 'rgba(248,113,113,0.12)';
   } else {
-    barHtml = `<div style="width:${fillPct}%;height:100%;background:#34d399;"></div>`;
     labelText = hasBudget ? 'Within budget' : 'No budget set';
-    labelColor = hasBudget ? '#34d399' : 'var(--txt1,var(--fg))';
+    labelColor = '#34d399';
+    labelBg = 'rgba(52,211,153,0.12)';
   }
 
   const myHours = EMP_DASH_FULL_HISTORY
     .filter(e => e.project === p.projectName && e.status !== 'Leave')
     .reduce((s, e) => s + Number(e.hours || 0), 0);
 
-  // Totals: Constant, total Points, Profit/Loss (project-wide,
-  // no names) — plus "Your Points", this employee's own share, which
-  // is entirely their own data and reveals nothing about teammates.
-  const profit = budget - totalCost;
-  const isProfit = profit >= 0;
+  const initials = (p.projectName || '?').trim().slice(0, 2).toUpperCase();
+  const avatarColor = empDashProjectColor(p.projectName);
+  const subtitle = opts.unmatched ? 'No project record' : esc(client?.name || p.clientId || '—');
+
+  return `
+    <div class="cp-entity-card emp-proj-card" data-project="${esc(p.projectName)}" style="cursor:pointer;padding:16px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+        <div style="width:38px;height:38px;border-radius:50%;background:${avatarColor};flex-shrink:0;
+          display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;">${esc(initials)}</div>
+        <span style="font-size:13px;color:var(--txt2,var(--muted));">›</span>
+      </div>
+      <div class="cp-entity-name" style="font-size:13.5px;line-height:1.3;margin-bottom:2px;">${esc(p.projectName || p.projectId)}</div>
+      <div style="font-size:11px;color:var(--txt2,var(--muted));margin-bottom:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${subtitle}</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;">Your hours: <strong style="color:var(--txt1);">${esc(fh(myHours))}</strong></div>
+      <div style="display:inline-flex;align-items:center;font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:20px;background:${labelBg};color:${labelColor};">${labelText}</div>
+    </div>`;
+}
+
+// Full project detail — everything that used to be crammed onto the
+// card (Constant, Points Used, Profit/Loss, Your Points, Start/End,
+// status, budget bar) now lives here instead, above the day-by-day
+// entries log. Replaces the whole #myProjCardsContainer content (same
+// container the dashboard cards render into) with a "← Back" button
+// that re-renders the dashboard — same in-page navigation pattern
+// Client-Project.js's own openProjectDetail() uses for Manager/TL,
+// just without any of its edit/save/delete UI (this is read-only,
+// own-data-only).
+function openEmpProjectDetailPage(projectName) {
+  const container = $('myProjCardsContainer');
+  if (!container) return;
+
+  const p = EMP_DASH_PROJECT_BY_NAME[projectName] || { projectId: '', projectName, clientId: '', status: '', projectConstant: 0, __unmatched: true };
+  const client = CP_CLIENTS.find(c => c.id === p.clientId);
   const moneyFmt = typeof fmtCPMoney === 'function' ? fmtCPMoney : (n => Math.round(Number(n) || 0).toLocaleString('en-IN'));
 
+  let totalCost = 0;
+  try { totalCost = getProjectCostBreakdown(p).totalCost; } catch (err) { /* leave at 0 */ }
+  let myCost = 0;
+  try { myCost = getMyProjectCost(p); } catch (err) { /* leave at 0 */ }
+
+  const budget = parseFloat(p.projectConstant) || 0;
+  const hasBudget = budget > 0;
+  const isOverBudget = hasBudget && totalCost > budget;
+  const fillPct = hasBudget ? Math.min((totalCost / budget) * 100, 100) : (totalCost > 0 ? 100 : 0);
+  const profit = budget - totalCost;
+  const isProfit = profit >= 0;
+
+  let barHtml, statusText, statusColor;
+  if (!totalCost) {
+    barHtml = `<div style="width:100%;height:100%;background:var(--border-md,#3a3f4b);"></div>`;
+    statusText = 'No hours logged yet'; statusColor = 'var(--txt1,var(--fg))';
+  } else if (isOverBudget) {
+    barHtml = `<div style="width:100%;height:100%;background:#f87171;"></div>`;
+    statusText = 'Over budget'; statusColor = '#f87171';
+  } else {
+    barHtml = `<div style="width:${fillPct}%;height:100%;background:#34d399;"></div>`;
+    statusText = hasBudget ? 'Within budget' : 'No budget set'; statusColor = hasBudget ? '#34d399' : 'var(--txt1,var(--fg))';
+  }
+
+  const summaryHtml = p.__unmatched
+    ? `<div style="font-size:11px;font-weight:700;color:var(--txt2);background:var(--surface2,#20242e);
+        border-radius:8px;padding:3px 9px;display:inline-block;margin-bottom:10px;">No project record</div>`
+    : `<div style="font-size:11px;color:var(--txt2,var(--muted));margin-bottom:10px;">
+        ${esc(p.projectId)} · ${esc(client?.name || p.clientId || '—')}
+        · Start: <strong style="color:var(--txt1);">${esc(fmtCPDateShort(p.startDate))}</strong>
+        · End: <strong style="color:var(--txt1);">${esc(fmtCPDateShort(p.endDate))}</strong>
+      </div>
+      <span class="cp-status-pill" style="background:rgba(79,142,247,0.12);color:#4f8ef7;margin-bottom:10px;display:inline-block;">${esc(p.status || 'In Progress')}</span>`;
+
   const totalsHtml = `
-    <div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:.6rem;font-size:11px;">
+    <div style="display:flex;gap:18px;flex-wrap:wrap;margin:10px 0;font-size:11px;">
       <div><span style="color:var(--muted);">Project Budget:</span> <strong style="color:var(--txt1);">${hasBudget ? esc(moneyFmt(budget)) : 'Not set'}</strong></div>
       <div><span style="color:var(--muted);">Total Points Used:</span> <strong style="color:var(--txt1);">${esc(moneyFmt(totalCost))}</strong></div>
       ${hasBudget ? `<div><span style="color:var(--muted);">${isProfit ? 'Profit Points' : 'Loss Points'}:</span> <strong style="color:${isProfit ? '#34d399' : '#f87171'};">${esc(moneyFmt(Math.abs(profit)))}</strong></div>` : ''}
       <div><span style="color:var(--muted);">My Points Used:</span> <strong style="color:#4f8ef7;">${esc(moneyFmt(myCost))}</strong></div>
-    </div>`;
-
-  const viewBtnHtml = `<button class="cp-view-btn emp-proj-view-btn" data-project="${esc(p.projectName)}"
-    style="margin-top:0;">View Details →</button>`;
-
-  // Anchored with position:absolute directly to the card's top-right
-  // corner, instead of relying on flex order/wrapping to keep it
-  // there — a flex-based approach kept drifting depending on card
-  // width, wrapping, or the shared .cp-view-btn class's own
-  // margin/align-self rules fighting with it. Absolute positioning
-  // sidesteps all of that: it's always top-right, period. The card
-  // itself gets position:relative (only place this is needed) and
-  // the title block gets right padding so it can't run underneath.
-  const topRightHtml = opts.unmatched
-    ? `<div style="position:absolute;top:14px;right:14px;">${viewBtnHtml}</div>`
-    : `<div style="position:absolute;top:14px;right:14px;display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
-        <span class="cp-status-pill" style="background:rgba(79,142,247,0.12);color:#4f8ef7;white-space:nowrap;">${esc(p.status || 'In Progress')}</span>
-        ${viewBtnHtml}
-      </div>`;
-
-  const titleHtml = opts.unmatched
-    ? `<div class="cp-entity-name" style="font-size:14px;padding-right:130px;">${esc(p.projectName)}
-        <span style="font-size:9.5px;font-weight:700;color:var(--txt2);background:var(--surface2,#20242e);
-          border-radius:8px;padding:1px 6px;margin-left:4px;vertical-align:middle;">No project record</span>
-      </div>`
-    : `<div style="padding-right:130px;">
-        <div class="cp-entity-name" style="font-size:14px;">${esc(p.projectName || p.projectId)}</div>
-        <div class="cp-entity-id">${esc(p.projectId)} · ${esc(client?.name || p.clientId || '—')}</div>
-      </div>`;
-
-  const datesHtml = opts.unmatched
-    ? ''
-    : `<div style="font-size:11px;color:var(--muted);margin-bottom:.4rem;">
-        Start: <strong style="color:var(--txt1);">${esc(fmtCPDateShort(p.startDate))}</strong>
-        · End: <strong style="color:var(--txt1);">${esc(fmtCPDateShort(p.endDate))}</strong>
-      </div>`;
-
-  return `
-    <div class="cp-entity-card" style="position:relative;">
-      ${topRightHtml}
-      <div style="margin-bottom:.6rem;">
-        ${titleHtml}
-      </div>
-      ${datesHtml}
-      <div style="font-size:11px;color:var(--muted);margin-bottom:.6rem;">Your hours on this project: <strong>${esc(fh(myHours))}</strong></div>
-      ${totalsHtml}
-      <div style="font-size:9px;font-weight:700;margin-bottom:4px;color:${labelColor};">${labelText}</div>
-      <div style="height:6px;background:var(--surface2,#20242e);border-radius:4px;overflow:hidden;">${barHtml}</div>
-    </div>`;
-}
-
-// Day-by-day log for ONE project, this employee's own entries only —
-// date, hours, task, and notes. Replaces the whole #myProjCardsContainer
-// content (same container the dashboard cards render into) rather than
-// popping up a modal, with a "← Back" button that re-renders the
-// dashboard — same in-page navigation pattern Client-Project.js's own
-// openProjectDetail() uses for Manager/TL, just without any of its
-// edit/save/delete UI (this is read-only, own-data-only).
-function openEmpProjectDetailPage(projectName) {
-  const container = $('myProjCardsContainer');
-  if (!container) return;
+    </div>
+    <div style="font-size:9px;font-weight:700;margin-bottom:4px;color:${statusColor};">${statusText}</div>
+    <div style="height:6px;background:var(--surface2,#20242e);border-radius:4px;overflow:hidden;margin-bottom:4px;">${barHtml}</div>`;
 
   const entries = EMP_DASH_FULL_HISTORY
     .filter(e => e.project === projectName && e.status !== 'Leave' && e.date)
@@ -625,8 +639,10 @@ function openEmpProjectDetailPage(projectName) {
       <button id="empProjDetailBack" class="cp-back-btn">← Back</button>
     </div>
     <div class="cp-card">
-      <div style="font-weight:700;font-size:16px;color:var(--txt1);margin-bottom:4px;">${esc(projectName)}</div>
-      <div style="font-size:11px;color:var(--txt2,var(--muted));margin-bottom:10px;">${entries.length} entr${entries.length !== 1 ? 'ies' : 'y'} · ${esc(fh(totalHours))} total</div>
+      <div style="font-weight:700;font-size:16px;color:var(--txt1);margin-bottom:6px;">${esc(projectName)}</div>
+      ${summaryHtml}
+      ${totalsHtml}
+      <div style="font-size:11px;color:var(--txt2,var(--muted));margin:10px 0 4px;">${entries.length} entr${entries.length !== 1 ? 'ies' : 'y'} · ${esc(fh(totalHours))} total</div>
       <div>${rowsHtml}</div>
     </div>`;
 
