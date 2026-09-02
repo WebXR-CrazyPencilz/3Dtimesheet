@@ -928,9 +928,11 @@ function buildEmpAttendanceRow(dateStr, dayEntries) {
   if (statusKey === 'worked') {
     const otThreshold = typeof OVERTIME_THRESHOLD_HOURS === 'number' ? OVERTIME_THRESHOLD_HOURS : 9;
     if (totalHours >= otThreshold) {
-      meta = { icon: '⚡', label: `OT · ${fh(totalHours)}`, fg: '#92400e', bg: 'rgba(251,191,36,0.18)' };
+      const overage = totalHours - otThreshold;
+      meta = { icon: '⚡', label: `OT · ${fh(overage)}`, fg: '#92400e', bg: 'rgba(251,191,36,0.18)' };
     } else if (totalHours > 0) {
-      meta = { icon: '🔵', label: `Permission · ${fh(totalHours)}`, fg: '#4f8ef7', bg: 'rgba(79,142,247,0.12)' };
+      const shortfall = otThreshold - totalHours;
+      meta = { icon: '🔵', label: `Permission · ${fh(shortfall)}`, fg: '#4f8ef7', bg: 'rgba(79,142,247,0.12)' };
     }
   }
 
