@@ -536,16 +536,33 @@ function buildEmpDashboardCard(p, opts = {}) {
       <div><span style="color:var(--muted);">Your Cost:</span> <strong style="color:#4f8ef7;">${esc(moneyFmt(myCost))}</strong></div>
     </div>`;
 
-  const headerHtml = opts.unmatched
-    ? `<div class="cp-entity-name" style="font-size:14px;">${esc(p.projectName)}
+  const viewBtnHtml = `<button class="cp-view-btn emp-proj-view-btn" data-project="${esc(p.projectName)}"
+    style="margin-top:0;">View Details →</button>`;
+
+  // Anchored with position:absolute directly to the card's top-right
+  // corner, instead of relying on flex order/wrapping to keep it
+  // there — a flex-based approach kept drifting depending on card
+  // width, wrapping, or the shared .cp-view-btn class's own
+  // margin/align-self rules fighting with it. Absolute positioning
+  // sidesteps all of that: it's always top-right, period. The card
+  // itself gets position:relative (only place this is needed) and
+  // the title block gets right padding so it can't run underneath.
+  const topRightHtml = opts.unmatched
+    ? `<div style="position:absolute;top:14px;right:14px;">${viewBtnHtml}</div>`
+    : `<div style="position:absolute;top:14px;right:14px;display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+        <span class="cp-status-pill" style="background:rgba(79,142,247,0.12);color:#4f8ef7;white-space:nowrap;">${esc(p.status || 'In Progress')}</span>
+        ${viewBtnHtml}
+      </div>`;
+
+  const titleHtml = opts.unmatched
+    ? `<div class="cp-entity-name" style="font-size:14px;padding-right:130px;">${esc(p.projectName)}
         <span style="font-size:9.5px;font-weight:700;color:var(--txt2);background:var(--surface2,#20242e);
           border-radius:8px;padding:1px 6px;margin-left:4px;vertical-align:middle;">No project record</span>
       </div>`
-    : `<div style="min-width:0;">
+    : `<div style="padding-right:130px;">
         <div class="cp-entity-name" style="font-size:14px;">${esc(p.projectName || p.projectId)}</div>
         <div class="cp-entity-id">${esc(p.projectId)} · ${esc(client?.name || p.clientId || '—')}</div>
-      </div>
-      <span class="cp-status-pill" style="background:rgba(79,142,247,0.12);color:#4f8ef7;flex-shrink:0;">${esc(p.status || 'In Progress')}</span>`;
+      </div>`;
 
   const datesHtml = opts.unmatched
     ? ''
@@ -555,16 +572,16 @@ function buildEmpDashboardCard(p, opts = {}) {
       </div>`;
 
   return `
-    <div class="cp-entity-card">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:.6rem;flex-wrap:wrap;">
-        ${headerHtml}
+    <div class="cp-entity-card" style="position:relative;">
+      ${topRightHtml}
+      <div style="margin-bottom:.6rem;">
+        ${titleHtml}
       </div>
       ${datesHtml}
       <div style="font-size:11px;color:var(--muted);margin-bottom:.6rem;">Your hours on this project: <strong>${esc(fh(myHours))}</strong></div>
       ${totalsHtml}
       <div style="font-size:9px;font-weight:700;margin-bottom:4px;color:${labelColor};">${labelText}</div>
       <div style="height:6px;background:var(--surface2,#20242e);border-radius:4px;overflow:hidden;">${barHtml}</div>
-      <button class="cp-view-btn emp-proj-view-btn" data-project="${esc(p.projectName)}" style="margin-top:10px;">View Details →</button>
     </div>`;
 }
 
