@@ -179,11 +179,11 @@ function buildEmpUnmatchedProjectCard(name) {
   // No real Project Master row exists for this name, so there's no
   // clientId/status/Constant to draw from — but getProjectCostBreakdown
   // and getMyProjectCost only need a projectName to match Timesheet
-  // entries against, so cost/Your Cost still work fine. Building a
+  // entries against, so the points figures still work fine. Building a
   // minimal synthetic project object and reusing buildEmpDashboardCard
   // directly means this gets the EXACT same bar behavior as a real
   // project with no budget set (a full green bar), instead of no bar
-  // at all — and the same Cost/Your Cost figures.
+  // at all — and the same Points/Your Points figures.
   const pseudoProject = { projectId: '', projectName: name, clientId: '', status: '', projectConstant: 0 };
   return buildEmpDashboardCard(pseudoProject, { unmatched: true });
 }
@@ -232,7 +232,7 @@ async function renderMyDashboardTab() {
 
   const hasAnyCards = myProjects.length > 0 || unmatchedNames.length > 0;
   const projectsHtml = hasAnyCards
-    ? `<div class="cp-card-grid" style="grid-template-columns:1fr;">
+    ? `<div class="cp-card-grid" style="grid-template-columns:repeat(auto-fill,minmax(min(440px,100%),1fr));">
         ${myProjects.map(buildEmpDashboardCard).join('')}
         ${unmatchedNames.map(buildEmpUnmatchedProjectCard).join('')}
       </div>`
@@ -241,7 +241,7 @@ async function renderMyDashboardTab() {
   container.innerHTML = statsHtml + projectsHtml;
 
   container.querySelectorAll('.emp-proj-view-btn').forEach(btn => {
-    btn.addEventListener('click', () => openEmpProjectDetailModal(btn.dataset.project));
+    btn.addEventListener('click', () => openEmpProjectDetailPage(btn.dataset.project));
   });
 
   $('empDashAnchorDate')?.addEventListener('change', e => {
@@ -404,10 +404,10 @@ function buildLast5DaysSection(anchor) {
     <div class="cp-card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.75rem;flex-wrap:wrap;gap:8px;">
         <div style="font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--txt2,var(--muted));">Last ${EMP_DASH_RECENT_DAYS_COUNT} Days</div>
-        <div style="display:flex;align-items:center;gap:8px;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
           <input type="date" id="empDashAnchorDate" value="${esc(anchor)}" max="${esc(todayStr())}"
             style="background:var(--surface2,#20242e);border:1px solid var(--border);border-radius:6px;
-            color:var(--txt1);font-size:12px;padding:6px 8px;"/>
+            color:var(--txt1);font-size:12px;padding:6px 8px;max-width:150px;"/>
           <button id="empDashViewAttendanceBtn" class="rbtn" style="white-space:nowrap;">View Attendance →</button>
         </div>
       </div>
@@ -521,8 +521,8 @@ function buildEmpDashboardCard(p, opts = {}) {
     .filter(e => e.project === p.projectName && e.status !== 'Leave')
     .reduce((s, e) => s + Number(e.hours || 0), 0);
 
-  // Totals: Constant, total project cost, Profit/Loss (project-wide,
-  // no names) — plus "Your Cost", this employee's own share, which
+  // Totals: Constant, total Points, Profit/Loss (project-wide,
+  // no names) — plus "Your Points", this employee's own share, which
   // is entirely their own data and reveals nothing about teammates.
   const profit = budget - totalCost;
   const isProfit = profit >= 0;
@@ -530,10 +530,10 @@ function buildEmpDashboardCard(p, opts = {}) {
 
   const totalsHtml = `
     <div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:.6rem;font-size:11px;">
-      <div><span style="color:var(--muted);">Constant:</span> <strong style="color:var(--txt1);">${hasBudget ? esc(moneyFmt(budget)) : 'Not set'}</strong></div>
-      <div><span style="color:var(--muted);">Cost:</span> <strong style="color:var(--txt1);">${esc(moneyFmt(totalCost))}</strong></div>
-      ${hasBudget ? `<div><span style="color:var(--muted);">${isProfit ? 'Profit' : 'Loss'}:</span> <strong style="color:${isProfit ? '#34d399' : '#f87171'};">${esc(moneyFmt(Math.abs(profit)))}</strong></div>` : ''}
-      <div><span style="color:var(--muted);">Your Cost:</span> <strong style="color:#4f8ef7;">${esc(moneyFmt(myCost))}</strong></div>
+      <div><span style="color:var(--muted);">Project Budget:</span> <strong style="color:var(--txt1);">${hasBudget ? esc(moneyFmt(budget)) : 'Not set'}</strong></div>
+      <div><span style="color:var(--muted);">Total Points Used:</span> <strong style="color:var(--txt1);">${esc(moneyFmt(totalCost))}</strong></div>
+      ${hasBudget ? `<div><span style="color:var(--muted);">${isProfit ? 'Profit Points' : 'Loss Points'}:</span> <strong style="color:${isProfit ? '#34d399' : '#f87171'};">${esc(moneyFmt(Math.abs(profit)))}</strong></div>` : ''}
+      <div><span style="color:var(--muted);">My Points Used:</span> <strong style="color:#4f8ef7;">${esc(moneyFmt(myCost))}</strong></div>
     </div>`;
 
   const viewBtnHtml = `<button class="cp-view-btn emp-proj-view-btn" data-project="${esc(p.projectName)}"
@@ -586,10 +586,16 @@ function buildEmpDashboardCard(p, opts = {}) {
 }
 
 // Day-by-day log for ONE project, this employee's own entries only —
-// date, hours, task, and notes. Reuses .cp-modal-overlay/.cp-modal
-// (injected by ensureCPStyles, already called before this can be
-// reached) so it looks consistent with the rest of the app's modals.
-function openEmpProjectDetailModal(projectName) {
+// date, hours, task, and notes. Replaces the whole #myProjCardsContainer
+// content (same container the dashboard cards render into) rather than
+// popping up a modal, with a "← Back" button that re-renders the
+// dashboard — same in-page navigation pattern Client-Project.js's own
+// openProjectDetail() uses for Manager/TL, just without any of its
+// edit/save/delete UI (this is read-only, own-data-only).
+function openEmpProjectDetailPage(projectName) {
+  const container = $('myProjCardsContainer');
+  if (!container) return;
+
   const entries = EMP_DASH_FULL_HISTORY
     .filter(e => e.project === projectName && e.status !== 'Leave' && e.date)
     .sort((a, b) => b.date.localeCompare(a.date));
@@ -614,21 +620,17 @@ function openEmpProjectDetailModal(projectName) {
       }).join('')
     : `<div style="font-size:12px;color:var(--txt2,var(--muted));padding:12px 0;">No entries found for this project.</div>`;
 
-  const overlay = document.createElement('div');
-  overlay.className = 'cp-modal-overlay';
-  overlay.innerHTML = `
-    <div class="cp-modal" style="width:420px;">
-      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:4px;">
-        <div style="font-weight:700;font-size:15px;color:var(--txt1);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(projectName)}</div>
-        <button id="empProjDetailClose" class="cp-icon-btn" title="Close" style="flex-shrink:0;">✕</button>
-      </div>
+  container.innerHTML = `
+    <div style="margin-bottom:1rem;">
+      <button id="empProjDetailBack" class="cp-back-btn">← Back</button>
+    </div>
+    <div class="cp-card">
+      <div style="font-weight:700;font-size:16px;color:var(--txt1);margin-bottom:4px;">${esc(projectName)}</div>
       <div style="font-size:11px;color:var(--txt2,var(--muted));margin-bottom:10px;">${entries.length} entr${entries.length !== 1 ? 'ies' : 'y'} · ${esc(fh(totalHours))} total</div>
-      <div style="max-height:60vh;overflow-y:auto;">${rowsHtml}</div>
+      <div>${rowsHtml}</div>
     </div>`;
-  document.body.appendChild(overlay);
 
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-  overlay.querySelector('#empProjDetailClose').addEventListener('click', () => overlay.remove());
+  $('empProjDetailBack').addEventListener('click', () => renderMyDashboardTab());
 }
 
 // ══════════════════════════════════════════════════════════════

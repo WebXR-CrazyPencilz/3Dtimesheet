@@ -259,11 +259,16 @@ input,select,textarea{-webkit-appearance:none;appearance:none}
    engages; the real responsive behavior still comes from the
    @media(max-width:640px) block below and from the card grids'
    own auto-fill columns collapsing naturally as the viewport shrinks.
-   The Employee (worker) portal keeps the original 960px — it's a
-   single-column timesheet view, not a dashboard, and was never part
-   of this widening. HR Portal joins Manager/Team Leader here since
-   it's also a dashboard-style shell, not a single-column view. */
-#mgrPortal .main,#tlPortal .main{max-width:1680px;padding:1.75rem 2.5rem}
+   The Employee (worker) portal joins them here too — it used to be a
+   single-column timesheet-only view (excluded from this widening on
+   that basis), but "My Dashboard" (myprojects-tab.js) turned it into
+   a real multi-widget dashboard, same shape as Manager/TL's, so it
+   gets the same treatment now. The Timesheet tab's own form/table
+   still read fine at this width — their internal auto-fit/table
+   layouts just get more breathing room, they don't break. HR Portal
+   joins Manager/Team Leader here too since it's also a dashboard-
+   style shell, not a single-column view. */
+#app .main,#mgrPortal .main,#tlPortal .main{max-width:1680px;padding:1.75rem 2.5rem}
 /* HR Portal has no width cap at all — the Attendance grid in
    particular (many day-columns side by side) benefits from using
    every available pixel on a wide monitor rather than being capped
