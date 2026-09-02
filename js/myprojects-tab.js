@@ -66,6 +66,32 @@ function initMyProjectsTab() {
     btn.addEventListener('click', () => switchEmpTab(btn.dataset.empTab));
   });
   watchForEmployeeLogin();
+  watchForViewportChange();
+}
+
+// Re-renders My Dashboard when resizing/rotating crosses the mobile
+// breakpoint, so the card design (detailed desktop vs. minimal
+// mobile) switches live instead of only being decided on first load.
+// Debounced and only fires when the mobile/desktop boundary is
+// actually crossed — resizing within the same "side" of 640px does
+// nothing, so this doesn't re-render on every pixel of a drag-resize.
+let EMP_DASH_WAS_MOBILE = null;
+function watchForViewportChange() {
+  let debounceTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      const isMobile = isEmpDashMobileViewport();
+      if (EMP_DASH_WAS_MOBILE === null) { EMP_DASH_WAS_MOBILE = isMobile; return; }
+      if (isMobile === EMP_DASH_WAS_MOBILE) return;
+      EMP_DASH_WAS_MOBILE = isMobile;
+      // Only re-render if My Dashboard is the currently visible tab —
+      // no point rendering into a hidden container.
+      if ($('empTabProjects') && $('empTabProjects').style.display !== 'none') {
+        renderMyDashboardTab();
+      }
+    }, 250);
+  });
 }
 
 // The dashboard needs to render as soon as an employee logs in
@@ -96,7 +122,14 @@ function watchForEmployeeLogin() {
     if (EMP_DASHBOARD_RENDERED_FOR === USER.id) return; // already rendered for this login
 
     EMP_DASHBOARD_RENDERED_FOR = USER.id;
-    renderMyDashboardTab();
+    // auth.js's own loginAs() fires its critical getHistory call at
+    // nearly this exact same instant (both are reacting to the same
+    // login moment). A short head start here lets that one request
+    // clear the concurrency queue before this file's own heavier
+    // burst of 5 requests begins, instead of all 6 competing for a
+    // slot at once — see ensureEmpDashboardDataLoaded's own comment
+    // for the full failure mode this is avoiding.
+    setTimeout(renderMyDashboardTab, 600);
   }, 400);
 }
 
@@ -128,13 +161,25 @@ function switchEmpTab(tab) {
 async function ensureEmpDashboardDataLoaded() {
   if (EMP_DASHBOARD_DATA_LOADED) return;
 
-  const [projects, clients, tlData, historical] = await Promise.all([
-    sheetGET({ action: 'getProjectMasterList' }),
-    sheetGET({ action: 'getClientMasterList' }),
-    sheetGET({ action: 'getTLData' }),
-    sheetGET({ action: 'getHistoricalRecords', filters: encodeURIComponent(JSON.stringify({})) }),
-    ensureEmpFullHistoryLoaded(),
-  ]);
+  // Fetched ONE AT A TIME, not with Promise.all — firing all 5 of
+  // these simultaneously (on top of the Timesheet tab's own
+  // getHistory call, which fires around the same moment at login)
+  // was exactly the request-burst failure mode api.js's own
+  // concurrency-limiter comment already describes: Apps Script's
+  // /exec redirect tokens can expire under a burst, especially on a
+  // slow/unstable connection, and getTLData in particular is the
+  // heaviest single request in this app (loops every employee's
+  // sheet in one execution) — competing for a slot at the same
+  // instant as everything else was dragging all of them down
+  // together into cascading timeouts. Sequencing spreads the load
+  // out over time instead, trading a little wall-clock time for
+  // reliability. getTLData is fetched last on purpose, once the
+  // lighter requests are already safely out of the way.
+  const projects   = await sheetGET({ action: 'getProjectMasterList' });
+  const clients     = await sheetGET({ action: 'getClientMasterList' });
+  const historical = await sheetGET({ action: 'getHistoricalRecords', filters: encodeURIComponent(JSON.stringify({})) });
+  await ensureEmpFullHistoryLoaded();
+  const tlData = await sheetGET({ action: 'getTLData' });
 
   // Populate Client-Project.js's own globals — see the file header
   // comment for why this is safe (CP_ROLE is never touched here).
@@ -245,7 +290,7 @@ async function renderMyDashboardTab() {
   });
 
   const projectsHtml = hasAnyCards
-    ? `<div class="cp-card-grid" style="grid-template-columns:repeat(auto-fill,minmax(min(220px,100%),1fr));">
+    ? `<div class="cp-card-grid" style="grid-template-columns:repeat(auto-fill,minmax(min(420px,100%),1fr));">
         ${myProjects.map(p => buildEmpDashboardCard(p)).join('')}
         ${unmatchedNames.map(buildEmpUnmatchedProjectCard).join('')}
       </div>`
@@ -491,14 +536,130 @@ function getMyProjectCost(p) {
   return cost;
 }
 
-// Minimal, tap-through card — icon, name, client, hours, and a single
-// budget-status line. All the dense figures (Constant, Points Used,
-// Profit/Loss, Your Points, Start/End dates) live on the detail page
-// now instead of being crammed onto the card itself — this is what
-// makes a clean 2-column mobile grid possible; the old version tried
-// to fit a small dashboard's worth of numbers into each card, which
-// is what made it look cramped next to a sparser reference design.
+// Detects mobile at render time (matches the CSS breakpoint used
+// throughout index.html's @media(max-width:640px) block) — used to
+// pick which of the two card designs below to render. Re-checked on
+// resize (see the listener near the bottom of this file) so rotating
+// a device or resizing a browser window switches the card design
+// live, not just on first load.
+function isEmpDashMobileViewport() {
+  return typeof window !== 'undefined' && window.innerWidth <= 640;
+}
+
+// Same detailed card everywhere now — desktop and mobile alike.
+// buildEmpDashboardCardMinimal (below) is kept but unused; the grid
+// itself switches to a single full-width column on mobile (see
+// index.html's @media(max-width:640px) block) so this dense card
+// still has room to read properly instead of being squeezed into a
+// narrow 2-column layout.
 function buildEmpDashboardCard(p, opts = {}) {
+  return buildEmpDashboardCardDetailed(p, opts);
+}
+
+// Desktop/PC card — the full breakdown inline (Constant, Points Used,
+// Profit/Loss, Your Points, Start/End dates, status, budget bar).
+// There's real room for this on a wide screen, so it doesn't need to
+// be pushed to the detail page the way the mobile card does.
+function buildEmpDashboardCardDetailed(p, opts = {}) {
+  const client = CP_CLIENTS.find(c => c.id === p.clientId);
+
+  let totalCost = 0;
+  try {
+    totalCost = getProjectCostBreakdown(p).totalCost;
+  } catch (err) {
+    console.warn('[myprojects-tab] Cost calc failed for', p.projectId, ':', err.message);
+  }
+
+  let myCost = 0;
+  try {
+    myCost = getMyProjectCost(p);
+  } catch (err) {
+    console.warn('[myprojects-tab] My-cost calc failed for', p.projectId, ':', err.message);
+  }
+
+  const budget = parseFloat(p.projectConstant) || 0;
+  const hasBudget = budget > 0;
+  const isOverBudget = hasBudget && totalCost > budget;
+  const fillPct = hasBudget
+    ? Math.min((totalCost / budget) * 100, 100)
+    : (totalCost > 0 ? 100 : 0);
+
+  let barHtml, labelText, labelColor;
+  if (!totalCost) {
+    barHtml = `<div style="width:100%;height:100%;background:var(--border-md,#3a3f4b);"></div>`;
+    labelText = 'No hours logged yet';
+    labelColor = 'var(--txt1,var(--fg))';
+  } else if (isOverBudget) {
+    barHtml = `<div style="width:100%;height:100%;background:#f87171;"></div>`;
+    labelText = 'Over budget';
+    labelColor = '#f87171';
+  } else {
+    barHtml = `<div style="width:${fillPct}%;height:100%;background:#34d399;"></div>`;
+    labelText = hasBudget ? 'Within budget' : 'No budget set';
+    labelColor = hasBudget ? '#34d399' : 'var(--txt1,var(--fg))';
+  }
+
+  const myHours = EMP_DASH_FULL_HISTORY
+    .filter(e => e.project === p.projectName && e.status !== 'Leave')
+    .reduce((s, e) => s + Number(e.hours || 0), 0);
+
+  const profit = budget - totalCost;
+  const isProfit = profit >= 0;
+  const moneyFmt = typeof fmtCPMoney === 'function' ? fmtCPMoney : (n => Math.round(Number(n) || 0).toLocaleString('en-IN'));
+
+  const totalsHtml = `
+    <div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:.6rem;font-size:11px;">
+      <div><span style="color:var(--muted);">Project Budget:</span> <strong style="color:var(--txt1);">${hasBudget ? esc(moneyFmt(budget)) : 'Not set'}</strong></div>
+      <div><span style="color:var(--muted);">Total Points Used:</span> <strong style="color:var(--txt1);">${esc(moneyFmt(totalCost))}</strong></div>
+      ${hasBudget ? `<div><span style="color:var(--muted);">${isProfit ? 'Profit Points' : 'Loss Points'}:</span> <strong style="color:${isProfit ? '#34d399' : '#f87171'};">${esc(moneyFmt(Math.abs(profit)))}</strong></div>` : ''}
+      <div><span style="color:var(--muted);">My Points Used:</span> <strong style="color:#4f8ef7;">${esc(moneyFmt(myCost))}</strong></div>
+    </div>`;
+
+  const viewBtnHtml = `<button class="cp-view-btn" style="margin-top:0;">View Details →</button>`;
+
+  const topRightHtml = opts.unmatched
+    ? `<div style="position:absolute;top:14px;right:14px;">${viewBtnHtml}</div>`
+    : `<div style="position:absolute;top:14px;right:14px;display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+        <span class="cp-status-pill" style="background:rgba(79,142,247,0.12);color:#4f8ef7;white-space:nowrap;">${esc(p.status || 'In Progress')}</span>
+        ${viewBtnHtml}
+      </div>`;
+
+  const titleHtml = opts.unmatched
+    ? `<div class="cp-entity-name" style="font-size:14px;padding-right:130px;">${esc(p.projectName)}
+        <span style="font-size:9.5px;font-weight:700;color:var(--txt2);background:var(--surface2,#20242e);
+          border-radius:8px;padding:1px 6px;margin-left:4px;vertical-align:middle;">No project record</span>
+      </div>`
+    : `<div style="padding-right:130px;">
+        <div class="cp-entity-name" style="font-size:14px;">${esc(p.projectName || p.projectId)}</div>
+        <div class="cp-entity-id">${esc(p.projectId)} · ${esc(client?.name || p.clientId || '—')}</div>
+      </div>`;
+
+  const datesHtml = opts.unmatched
+    ? ''
+    : `<div style="font-size:11px;color:var(--muted);margin-bottom:.4rem;">
+        Start: <strong style="color:var(--txt1);">${esc(fmtCPDateShort(p.startDate))}</strong>
+        · End: <strong style="color:var(--txt1);">${esc(fmtCPDateShort(p.endDate))}</strong>
+      </div>`;
+
+  return `
+    <div class="cp-entity-card emp-proj-card" data-project="${esc(p.projectName)}" style="position:relative;cursor:pointer;min-width:0;overflow:hidden;">
+      ${topRightHtml}
+      <div style="margin-bottom:.6rem;">
+        ${titleHtml}
+      </div>
+      ${datesHtml}
+      <div style="font-size:11px;color:var(--muted);margin-bottom:.6rem;">Your hours on this project: <strong>${esc(fh(myHours))}</strong></div>
+      ${totalsHtml}
+      <div style="font-size:9px;font-weight:700;margin-bottom:4px;color:${labelColor};">${labelText}</div>
+      <div style="height:6px;background:var(--surface2,#20242e);border-radius:4px;overflow:hidden;">${barHtml}</div>
+    </div>`;
+}
+
+// Mobile card — icon, name, client, hours, and a single budget-status
+// line. All the dense figures (Constant, Points Used, Profit/Loss,
+// Your Points, Start/End dates) live on the detail page instead, so a
+// clean 2-column mobile grid is possible without cramming.
+function buildEmpDashboardCardMinimal(p, opts = {}) {
   const client = CP_CLIENTS.find(c => c.id === p.clientId);
 
   let totalCost = 0;
@@ -536,7 +697,7 @@ function buildEmpDashboardCard(p, opts = {}) {
   const subtitle = opts.unmatched ? 'No project record' : esc(client?.name || p.clientId || '—');
 
   return `
-    <div class="cp-entity-card emp-proj-card" data-project="${esc(p.projectName)}" style="cursor:pointer;padding:16px;">
+    <div class="cp-entity-card emp-proj-card" data-project="${esc(p.projectName)}" style="cursor:pointer;padding:16px;min-width:0;overflow:hidden;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
         <div style="width:38px;height:38px;border-radius:50%;background:${avatarColor};flex-shrink:0;
           display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;">${esc(initials)}</div>

@@ -492,7 +492,21 @@ tr:hover .del-btn{opacity:1}
   /* My Dashboard's project cards are now minimal (icon, name, one
      status line — no dense figures), so a 2-column grid reads cleanly
      on a phone instead of needing to collapse to one column. */
-  .cp-card-grid{grid-template-columns:repeat(2,1fr)!important;gap:10px!important;}
+  /* My Dashboard's project cards show the same detailed content on
+     every screen size (Constant/Points/Profit-Loss/dates/etc.) — that
+     much content needs a full-width single column on a phone, not a
+     2-column squeeze (which is what re-created the original cramped
+     problem this override exists to prevent). */
+  .cp-card-grid{grid-template-columns:1fr!important;}
+  /* Grid items default to min-width:auto, meaning a child with
+     non-wrapping text (long project/client names, etc.) can force its
+     column wider than the track's own 1fr sizing — overflowing the
+     whole page and forcing horizontal scroll/zoom on mobile. This
+     resets that default for every direct child of any .cp-card-grid
+     (My Dashboard, Manager, Team Leader alike), letting the column
+     actually shrink to fit and the child's own text-overflow:ellipsis
+     truncate as intended instead. */
+  .cp-card-grid > *{min-width:0}
   .fcard{padding:1.1rem}.ptitle{font-size:1.25rem}
   .frow{grid-template-columns:1fr}.strip{flex-wrap:wrap}
   .sitem{border-right:none;border-bottom:1px solid var(--border);flex:1 1 45%}
