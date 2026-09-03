@@ -27,10 +27,23 @@ let TL_EMPLOYEES   = [];
 let TL_CLIENTS     = [];
 let TL_PROJECTS    = [];
 
-let TL_TAB         = 'employees';  // project|employees|attendance|historical — Employees is the default landing tab (Team Leader manages people first)
+let TL_TAB         = 'employees';  // project|employees|timesheet|attendance|historical — Employees is the default landing tab (Team Leader manages people first)
 let TL_RANGE       = 'week';
 let TL_DAY_OFFSET  = 0;
 let TL_MONTH       = '';
+
+// Timesheet tab's own state — same shape as manager.js's MGR_TS_*,
+// showing the exact same thing Manager sees (this tab has no
+// cost/points/financial figures at all, so there's no permission
+// boundary being crossed by matching Manager's view exactly here).
+let TL_TS_RANGE          = 'day15';
+let TL_TS_DAY_OFFSET     = 0;
+let TL_TS_SELECTED_MONTH = '';
+let TL_TS_MONTH_DAY      = ''; // 'YYYY-MM-DD' — a specific day within the selected month; '' = whole month
+let TL_TS_EMP_FILTER     = '';
+let TL_TS_SEARCH         = '';
+let TL_TS_PAGE           = 0;
+const TL_TS_PAGE_SIZE    = 10; // dates per page
 
 const TL_PALETTE = [
   '#4f8ef7','#7c5cfc','#34d399','#fbbf24',
@@ -41,6 +54,7 @@ const TL_PALETTE = [
 // ── INIT ──────────────────────────────────────────
 async function initTeamLeader() {
   TL_MONTH = todayStr().slice(0,7);
+  TL_TS_SELECTED_MONTH = todayStr().slice(0,7);
   const container = $('tlApp');
   if (!container) return;
 
@@ -124,6 +138,7 @@ function renderTLPortal() {
       ${[
         { id:'project',      icon:'📁', label:'Projects & Clients' },
         { id:'employees',    icon:'👥', label:'Employees'  },
+        { id:'timesheet',    icon:'🕐', label:'Timesheet' },
         { id:'attendance',   icon:'🕒', label:'Attendance' },
         { id:'historical',   icon:'📜', label:'Historical Import' },
       ].map(t => `
@@ -169,6 +184,8 @@ function renderTLTab() {
   }
 
   if (TL_TAB === 'employees') { renderTLEmployeesTab(content); return; }
+
+  if (TL_TAB === 'timesheet') { renderTLTimesheetTab(content); return; }
 
   if (TL_TAB === 'attendance') {
     if (typeof renderAttendanceTab === 'function') renderAttendanceTab(content);
@@ -526,6 +543,456 @@ async function applyTLLeave(btn, empId, date, empName) {
     btn.disabled=false; btn.textContent='Force Leave';
     tlToast(`❌ Failed: ${err.message}`, true);
   }
+}
+
+// ══════════════════════════════════════════════════
+// TIMESHEET MODULE — every employee's entries, grouped date-wise.
+// Ported directly from manager.js's own Timesheet tab, showing the
+// exact same thing Manager sees. Reuses TL_DATA (already loaded once
+// in initTeamLeader via the same getTLData action Manager uses, so
+// it already carries every employee, not just this TL's own team —
+// tagged with empId/empName on every entry) — no new fetch needed.
+// Own range/filter/page state (TL_TS_*), independent of the
+// Employees tab's own TL_RANGE/TL_DAY_OFFSET/TL_MONTH. This tab
+// shows no cost/points/financial figures at all, so there's no
+// Manager-only boundary being crossed by matching Manager's view
+// exactly here (unlike, say, Project Constant/Profit-Loss elsewhere
+// in this portal, which stays Manager-only by design).
+// ══════════════════════════════════════════════════
+function getTLTimesheetFiltered() {
+  let rows;
+  if (TL_TS_RANGE === 'month') {
+    rows = TL_TS_MONTH_DAY
+      ? TL_DATA.filter(e => e.date === TL_TS_MONTH_DAY)
+      : TL_DATA.filter(e => e.date.startsWith(TL_TS_SELECTED_MONTH));
+  } else {
+    // 'day15' — the only other/default mode
+    const d = getTL15Days()[TL_TS_DAY_OFFSET];
+    rows = TL_DATA.filter(e => e.date === d);
+  }
+
+  if (TL_TS_EMP_FILTER) rows = rows.filter(e => e.empId === TL_TS_EMP_FILTER);
+
+  if (TL_TS_SEARCH) {
+    const q = TL_TS_SEARCH.toLowerCase();
+    rows = rows.filter(e =>
+      [e.empName, e.project, e.client, e.task, e.notes].some(v => v && String(v).toLowerCase().includes(q))
+    );
+  }
+
+  return rows;
+}
+
+const TL_TS_RANGE_COLORS = {
+  day15: { bg: 'linear-gradient(135deg,#4f8ef7,#38bdf8)', fg: '#4f8ef7' },
+  month: { bg: 'linear-gradient(135deg,#f59e0b,#fbbf24)', fg: '#f59e0b' },
+};
+
+function renderTLTimesheetTab(content) {
+  content.innerHTML = `
+    <div class="mgr-controls">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;" id="tlTsRange">
+        ${[
+          { id:'day15', label:'📅 15 Days' },
+          { id:'month', label:'📆 This Month' },
+        ].map(r => {
+          const active = TL_TS_RANGE === r.id;
+          const c = TL_TS_RANGE_COLORS[r.id];
+          return `<button class="tl-ts-rbtn" data-range="${r.id}" style="padding:7px 14px;border-radius:20px;
+            border:1px solid ${active ? 'transparent' : 'var(--border-md)'};
+            background:${active ? c.bg : 'var(--surface2)'};
+            color:${active ? '#fff' : 'var(--txt2)'};
+            font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:all .15s;">${r.label}</button>`;
+        }).join('')}
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <select id="tlTsEmpFilter" class="filt">
+          <option value="">All Employees</option>
+          ${TL_EMPLOYEES.filter(emp => emp.active).map(emp => `<option value="${esc(emp.id)}" ${TL_TS_EMP_FILTER===emp.id?'selected':''}>${esc(emp.name)}</option>`).join('')}
+        </select>
+        <input type="search" id="tlTsSearch" class="srch" placeholder="Search project, notes…" value="${esc(TL_TS_SEARCH)}"/>
+      </div>
+    </div>
+
+    <div id="tlTsDayScroll" style="display:${TL_TS_RANGE==='day15'?'flex':'none'};
+      gap:6px;margin-bottom:1rem;overflow-x:auto;padding-bottom:4px;min-width:0;"></div>
+
+    <div id="tlTsMonthPicker" style="display:${TL_TS_RANGE==='month'?'flex':'none'};
+      gap:8px;margin-bottom:1rem;align-items:center;min-width:0;"></div>
+
+    <div id="tlTsMonthDayScroll" style="display:${TL_TS_RANGE==='month'?'flex':'none'};
+      gap:6px;margin-bottom:1rem;overflow-x:auto;padding-bottom:4px;min-width:0;"></div>
+
+    <div id="tlTsContent"></div>
+  `;
+
+  $('tlTsRange').addEventListener('click', e => {
+    const btn = e.target.closest('.tl-ts-rbtn');
+    if (!btn) return;
+    TL_TS_RANGE = btn.dataset.range;
+    TL_TS_DAY_OFFSET = 0;
+    TL_TS_MONTH_DAY = '';
+    TL_TS_PAGE = 0;
+    renderTLTimesheetTab(content); // full re-render — rebuilds the pills' active colors and swaps which picker shows
+  });
+
+  $('tlTsEmpFilter').addEventListener('change', e => {
+    TL_TS_EMP_FILTER = e.target.value;
+    TL_TS_PAGE = 0;
+    renderTLTsContent();
+  });
+
+  $('tlTsSearch').addEventListener('input', e => {
+    TL_TS_SEARCH = e.target.value;
+    TL_TS_PAGE = 0;
+    renderTLTsContent();
+  });
+
+  if (TL_TS_RANGE === 'day15') buildTLTsDayScrollBar();
+  if (TL_TS_RANGE === 'month') { buildTLTsMonthPicker(); buildTLTsMonthDayScrollBar(); }
+  renderTLTsContent();
+}
+
+function buildTLTsDayScrollBar() {
+  const bar = $('tlTsDayScroll'); if (!bar) return;
+  const days = getTL15Days();
+  bar.innerHTML = days.map((d,i) => {
+    const isActive  = i===TL_TS_DAY_OFFSET;
+    const isWeekend = new Date(d+'T00:00:00').getDay()%6===0;
+    const label = i === 0 ? 'Today' : i === 1 ? 'Yesterday' : tlFmtDate(d);
+    return `<button data-offset="${i}" style="flex-shrink:0;padding:6px 14px;border-radius:20px;
+      border:1px solid ${isActive?'transparent':'var(--border)'};
+      background:${isActive?'linear-gradient(135deg,#4f8ef7,#38bdf8)':'var(--surface2)'};
+      color:${isActive?'#fff':isWeekend?'#a78bfa':'var(--txt1)'};
+      font-size:11px;font-weight:${isActive?'700':'500'};cursor:pointer;white-space:nowrap;transition:all .15s;">${label}</button>`;
+  }).join('');
+  bar.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      TL_TS_DAY_OFFSET = parseInt(btn.dataset.offset);
+      TL_TS_PAGE = 0;
+      buildTLTsDayScrollBar();
+      renderTLTsContent();
+    });
+  });
+
+  if (!bar.dataset.wheelWired) {
+    bar.dataset.wheelWired = '1';
+    bar.addEventListener('wheel', e => {
+      if (e.deltaY === 0) return;
+      e.preventDefault();
+      bar.scrollLeft += e.deltaY;
+    }, { passive: false });
+  }
+}
+
+function stepTLTsMonth(dir) {
+  const [y, m] = TL_TS_SELECTED_MONTH.split('-').map(Number);
+  const next = new Date(y, (m - 1) + dir, 1);
+  const nextVal = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}`;
+  if (nextVal > todayStr().slice(0, 7)) return; // never step past the current month into the future
+  TL_TS_SELECTED_MONTH = nextVal;
+  TL_TS_MONTH_DAY = '';
+  TL_TS_PAGE = 0;
+  buildTLTsMonthPicker();
+  buildTLTsMonthDayScrollBar();
+  renderTLTsContent();
+}
+
+function buildTLTsMonthPicker() {
+  const picker = $('tlTsMonthPicker'); if (!picker) return;
+  const isCurrentMonth = TL_TS_SELECTED_MONTH >= todayStr().slice(0, 7);
+
+  picker.innerHTML = `
+    <button id="tlTsMonthPrev" class="pbtn" title="Previous month">‹</button>
+    <input type="month" id="tlTsMonthInput" value="${esc(TL_TS_SELECTED_MONTH)}" max="${esc(todayStr().slice(0,7))}"
+      style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;
+      color:var(--txt1);font-size:13px;padding:8px 12px;cursor:pointer;"/>
+    <button id="tlTsMonthNext" class="pbtn" ${isCurrentMonth ? 'disabled' : ''} title="Next month">›</button>`;
+
+  const input = $('tlTsMonthInput');
+  input.addEventListener('change', e => {
+    TL_TS_SELECTED_MONTH = e.target.value || todayStr().slice(0,7);
+    TL_TS_MONTH_DAY = '';
+    TL_TS_PAGE = 0;
+    buildTLTsMonthPicker();
+    buildTLTsMonthDayScrollBar();
+    renderTLTsContent();
+  });
+
+  $('tlTsMonthPrev').addEventListener('click', () => stepTLTsMonth(-1));
+  $('tlTsMonthNext').addEventListener('click', () => stepTLTsMonth(1));
+
+  input.addEventListener('wheel', e => {
+    e.preventDefault();
+    stepTLTsMonth(e.deltaY > 0 ? 1 : -1);
+  }, { passive: false });
+}
+
+function buildTLTsMonthDayScrollBar() {
+  const bar = $('tlTsMonthDayScroll'); if (!bar) return;
+
+  const [y, m] = TL_TS_SELECTED_MONTH.split('-').map(Number);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const today = todayStr();
+  const isCurrentMonth = TL_TS_SELECTED_MONTH === today.slice(0, 7);
+  const lastDay = isCurrentMonth ? Number(today.slice(8, 10)) : daysInMonth;
+
+  const allChip = `<button data-day="" style="flex-shrink:0;padding:6px 14px;border-radius:20px;
+    border:1px solid ${!TL_TS_MONTH_DAY?'transparent':'var(--border)'};
+    background:${!TL_TS_MONTH_DAY?'linear-gradient(135deg,#f59e0b,#fbbf24)':'var(--surface2)'};
+    color:${!TL_TS_MONTH_DAY?'#fff':'var(--txt1)'};
+    font-size:11px;font-weight:${!TL_TS_MONTH_DAY?'700':'500'};cursor:pointer;white-space:nowrap;transition:all .15s;">All Month</button>`;
+
+  const dayChips = [];
+  for (let d = 1; d <= lastDay; d++) {
+    const dateStr = `${TL_TS_SELECTED_MONTH}-${String(d).padStart(2,'0')}`;
+    const isActive  = TL_TS_MONTH_DAY === dateStr;
+    const weekday   = new Date(dateStr+'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short' });
+    const isWeekend = new Date(dateStr+'T00:00:00').getDay() % 6 === 0;
+    const isToday   = dateStr === today;
+    const label     = isToday ? 'Today' : `${weekday} ${d}`;
+    dayChips.push(`<button data-day="${dateStr}" style="flex-shrink:0;padding:6px 14px;border-radius:20px;
+      border:1px solid ${isActive?'transparent':isToday?'#4f8ef7':'var(--border)'};
+      background:${isActive?'linear-gradient(135deg,#f59e0b,#fbbf24)':'var(--surface2)'};
+      color:${isActive?'#fff':isWeekend?'#a78bfa':'var(--txt1)'};
+      font-size:11px;font-weight:${isActive?'700':'500'};cursor:pointer;white-space:nowrap;transition:all .15s;">${label}</button>`);
+  }
+
+  bar.innerHTML = allChip + dayChips.join('');
+
+  bar.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      TL_TS_MONTH_DAY = btn.dataset.day;
+      TL_TS_PAGE = 0;
+      buildTLTsMonthDayScrollBar();
+      renderTLTsContent();
+    });
+  });
+
+  if (!bar.dataset.wheelWired) {
+    bar.dataset.wheelWired = '1';
+    bar.addEventListener('wheel', e => {
+      if (e.deltaY === 0) return;
+      e.preventDefault();
+      bar.scrollLeft += e.deltaY;
+    }, { passive: false });
+  }
+}
+
+function renderTLTsContent() {
+  const content = $('tlTsContent');
+  if (!content) return;
+
+  const rows = getTLTimesheetFiltered();
+
+  const byDate = {};
+  rows.forEach(e => {
+    if (!e.date) return;
+    if (!byDate[e.date]) byDate[e.date] = [];
+    byDate[e.date].push(e);
+  });
+  const dates = Object.keys(byDate).sort((a,b) => b.localeCompare(a));
+
+  if (!dates.length) {
+    content.innerHTML = `<div class="chart-empty">No timesheet entries for this range.</div>`;
+    return;
+  }
+
+  const totalPages = Math.max(1, Math.ceil(dates.length / TL_TS_PAGE_SIZE));
+  if (TL_TS_PAGE >= totalPages) TL_TS_PAGE = totalPages - 1;
+  const pageDates = dates.slice(TL_TS_PAGE * TL_TS_PAGE_SIZE, (TL_TS_PAGE + 1) * TL_TS_PAGE_SIZE);
+
+  content.innerHTML = `
+    <div class="card" style="padding:1.25rem;">
+      ${pageDates.map(d => buildTLTsDateSection(d, byDate[d])).join('')}
+    </div>
+    <div id="tlTsPager" style="margin-top:1rem;"></div>
+  `;
+
+  renderTLTsPager(totalPages);
+
+  if (!content.dataset.wired) {
+    content.dataset.wired = '1';
+    content.addEventListener('click', e => {
+      const entryBtn = e.target.closest('.tl-ts-force-entry');
+      if (entryBtn) {
+        openForceEntry(entryBtn.dataset.empId, entryBtn.dataset.empName, entryBtn.dataset.date, () => renderTLPortal());
+        return;
+      }
+      const leaveBtn = e.target.closest('.tl-ts-force-leave');
+      if (leaveBtn) {
+        applyTLTsForceLeave(leaveBtn, leaveBtn.dataset.empId, leaveBtn.dataset.empName, leaveBtn.dataset.date);
+      }
+    });
+  }
+}
+
+// Same lightweight single-action Force Leave as manager.js's version
+// — reuses the exact same forceLeave backend action applyTLLeave
+// (elsewhere in this file) already uses. Updates TL_DATA locally so
+// the Timesheet view reflects it immediately.
+async function applyTLTsForceLeave(btn, empId, empName, dateStr) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = '…';
+  try {
+    await sheetGET({ action: 'forceLeave', data: encodeURIComponent(JSON.stringify({ uid: empId, date: dateStr })) });
+    TL_DATA.push({ empId, empName, date: dateStr, status: 'Leave', hours: '0h', slot: '', project: '', notes: 'Force leave applied by team leader' });
+    toast?.('s', 'Leave applied', `${empName} marked on leave for ${dateStr}`);
+    renderTLTsContent();
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = original;
+    toast?.('e', 'Failed', err.message);
+  }
+}
+
+
+// Consistent color per employee/project name — same hashing approach
+// as manager.js's mgrColorForKey, using this file's own TL_PALETTE.
+function tlColorForKey(key) {
+  const str = String(key || '');
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
+  return TL_PALETTE[hash % TL_PALETTE.length];
+}
+
+function buildTLTsDateSection(dateStr, entries) {
+  const dateLabel = new Date(dateStr+'T00:00:00').toLocaleDateString('en-IN',
+    { weekday:'long', day:'numeric', month:'short', year:'numeric' });
+  const totalHours = tlCalcHours(entries);
+  const empCount = new Set(entries.map(e => e.empId)).size;
+
+  const byEmp = {};
+  entries.forEach(e => {
+    if (!byEmp[e.empId]) byEmp[e.empId] = { empName: e.empName || e.empId, rows: [] };
+    byEmp[e.empId].rows.push(e);
+  });
+
+  // Same "show everyone" behavior as manager.js's version — when no
+  // specific-employee filter is active, every employee on the roster
+  // appears for this date, including those who logged nothing.
+  let displayEmpIds;
+  if (TL_TS_EMP_FILTER) {
+    displayEmpIds = Object.keys(byEmp);
+  } else {
+    displayEmpIds = TL_EMPLOYEES.filter(emp => emp.active).map(emp => emp.id);
+    Object.keys(byEmp).forEach(id => { if (!displayEmpIds.includes(id)) displayEmpIds.push(id); });
+  }
+
+  const empNameFor = empId => {
+    if (byEmp[empId]) return byEmp[empId].empName;
+    const emp = TL_EMPLOYEES.find(e => e.id === empId);
+    return emp ? emp.name : empId;
+  };
+
+  const sortedEmpIds = displayEmpIds.slice().sort((a,b) => empNameFor(a).localeCompare(empNameFor(b)));
+
+  const rowsHtml = sortedEmpIds.map(empId => {
+    const empName  = empNameFor(empId);
+    const empColor = tlColorForKey(empName);
+    const initials = empName.trim().slice(0, 2).toUpperCase();
+    const entryData = byEmp[empId];
+
+    if (!entryData) {
+      return `
+        <div style="padding:10px 0;border-bottom:1px solid var(--border);opacity:.75;min-width:0;overflow:hidden;">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0;">
+            <div style="width:26px;height:26px;border-radius:50%;background:${empColor};flex-shrink:0;
+              display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;color:#fff;">${esc(initials)}</div>
+            <span style="font-size:13px;font-weight:700;color:var(--txt1);flex:1 1 auto;min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(empName)}</span>
+            <span style="font-size:11px;font-style:italic;color:var(--txt2);flex-shrink:0;">No entries logged</span>
+            <button class="pbtn tl-ts-force-entry" data-emp-id="${esc(empId)}" data-emp-name="${esc(empName)}" data-date="${esc(dateStr)}" style="flex-shrink:0;">Force Entry</button>
+            <button class="pbtn tl-ts-force-leave" data-emp-id="${esc(empId)}" data-emp-name="${esc(empName)}" data-date="${esc(dateStr)}" style="flex-shrink:0;">Force Leave</button>
+          </div>
+        </div>`;
+    }
+
+    const { rows } = entryData;
+    const empHours = tlCalcHours(rows);
+
+    const slotHourTotals = {};
+    rows.forEach(e => {
+      if (e.status === 'Leave' || e.status === 'Holiday') return;
+      if (!(e.timeIn && e.timeOut)) return;
+      const key = e.slot;
+      if (!key) return;
+      slotHourTotals[key] = (slotHourTotals[key] || 0) + tlParseH(e.hours);
+    });
+    const slotSummaryHtml = Object.keys(slotHourTotals).length > 1
+      ? ['morning', 'afternoon', 'extended']
+          .filter(key => slotHourTotals[key] > 0)
+          .map(key => {
+            const meta = { morning: { icon: '🌅', label: 'Morning' }, afternoon: { icon: '☀️', label: 'Afternoon' }, extended: { icon: '🌙', label: 'Extended' } }[key];
+            return `<span style="white-space:nowrap;">${meta.icon} ${meta.label}: <strong style="color:var(--txt1);">${fh(slotHourTotals[key])}</strong></span>`;
+          }).join('<span style="color:var(--border-md);">·</span>')
+      : '';
+
+    const entryRows = rows.map(e => {
+      const isLeave   = e.status === 'Leave';
+      const isHoliday = e.status === 'Holiday';
+      const projectLabel = isLeave ? '🏖️ Leave' : isHoliday ? '🎉 Holiday' : (e.project || '—');
+      const projectColor = isLeave ? '#fbbf24' : isHoliday ? '#9ca3af' : tlColorForKey(e.project || '—');
+      const hasRealTimes = !!(e.timeIn && e.timeOut);
+      const slotMeta = hasRealTimes ? { morning: { icon: '🌅', label: 'Morning' }, afternoon: { icon: '☀️', label: 'Afternoon' }, extended: { icon: '🌙', label: 'Extended' } }[e.slot] : null;
+      const slotBadge = slotMeta
+        ? `<span style="flex:0 0 auto;font-size:9.5px;font-weight:700;color:var(--txt2);background:var(--surface2);
+            border:1px solid var(--border);border-radius:10px;padding:2px 8px;white-space:nowrap;">${slotMeta.icon} ${slotMeta.label}</span>`
+        : '';
+      return `
+        <div style="display:flex;align-items:center;gap:10px;padding:4px 0;font-size:12px;flex-wrap:wrap;">
+          ${slotBadge}
+          <span style="flex:0 1 170px;min-width:80px;color:${projectColor};font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(projectLabel)}</span>
+          <span style="flex:0 0 70px;color:var(--txt2);text-align:right;">${(isLeave||isHoliday) ? '—' : fh(tlParseH(e.hours))}</span>
+          <span style="flex:1;min-width:0;color:var(--txt2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(e.notes||'')}">${e.notes ? esc(e.notes) : ''}</span>
+        </div>`;
+    }).join('');
+
+    return `
+      <div style="padding:10px 0;border-bottom:1px solid var(--border);">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:${slotSummaryHtml ? '2px' : '4px'};">
+          <div style="width:26px;height:26px;border-radius:50%;background:${empColor};flex-shrink:0;
+            display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;color:#fff;">${esc(initials)}</div>
+          <span style="font-size:13px;font-weight:700;color:var(--txt1);flex:1 1 auto;min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(empName)}</span>
+          <span style="font-size:12px;font-weight:700;color:var(--a1);">${fh(empHours)}</span>
+        </div>
+        ${slotSummaryHtml ? `<div style="padding-left:36px;margin-bottom:6px;font-size:11px;color:var(--txt2);display:flex;gap:8px;flex-wrap:wrap;">${slotSummaryHtml}</div>` : ''}
+        <div style="padding-left:36px;">${entryRows}</div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div style="margin-bottom:1.5rem;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding-bottom:8px;border-bottom:2px solid var(--border-md);">
+        <span style="display:inline-flex;align-items:center;font-size:12px;font-weight:700;color:#38bdf8;
+          background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.3);
+          border-radius:8px;padding:4px 12px;">${esc(dateLabel)}</span>
+        <span style="font-size:12px;color:var(--txt2);">${empCount} employee${empCount!==1?'s':''} · ${fh(totalHours)} total</span>
+      </div>
+      ${rowsHtml}
+    </div>`;
+}
+
+function renderTLTsPager(totalPages) {
+  const pagerEl = $('tlTsPager');
+  if (!pagerEl) return;
+  if (totalPages <= 1) { pagerEl.innerHTML = ''; return; }
+
+  const pageNums = [];
+  for (let p = 0; p < totalPages; p++) pageNums.push(p);
+
+  pagerEl.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap;">
+      <button class="pbtn" id="tlTsPagePrev" ${TL_TS_PAGE===0?'disabled':''}>‹ Prev</button>
+      ${pageNums.map(p => `<button class="pbtn${p===TL_TS_PAGE?' cur':''}" data-page="${p}">${p+1}</button>`).join('')}
+      <button class="pbtn" id="tlTsPageNext" ${TL_TS_PAGE===totalPages-1?'disabled':''}>Next ›</button>
+    </div>`;
+
+  $('tlTsPagePrev')?.addEventListener('click', () => { if (TL_TS_PAGE>0) { TL_TS_PAGE--; renderTLTsContent(); } });
+  $('tlTsPageNext')?.addEventListener('click', () => { if (TL_TS_PAGE<totalPages-1) { TL_TS_PAGE++; renderTLTsContent(); } });
+  pagerEl.querySelectorAll('.pbtn[data-page]').forEach(btn => {
+    btn.addEventListener('click', () => { TL_TS_PAGE = parseInt(btn.dataset.page, 10); renderTLTsContent(); });
+  });
 }
 
 // ── DAY SCROLL ────────────────────────────────────

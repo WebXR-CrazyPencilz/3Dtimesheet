@@ -536,7 +536,7 @@ function renderMgrTimesheetTab(content) {
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
         <select id="mgrTsEmpFilter" class="filt">
           <option value="">All Employees</option>
-          ${MGR_EMPLOYEES.map(emp => `<option value="${esc(emp.id)}" ${MGR_TS_EMP_FILTER===emp.id?'selected':''}>${esc(emp.name)}</option>`).join('')}
+          ${MGR_EMPLOYEES.filter(emp => emp.active).map(emp => `<option value="${esc(emp.id)}" ${MGR_TS_EMP_FILTER===emp.id?'selected':''}>${esc(emp.name)}</option>`).join('')}
         </select>
         <input type="search" id="mgrTsSearch" class="srch" placeholder="Search project, notes…" value="${esc(MGR_TS_SEARCH)}"/>
       </div>
@@ -693,13 +693,15 @@ function buildMgrTsMonthDayScrollBar() {
   for (let d = 1; d <= lastDay; d++) {
     const dateStr = `${MGR_TS_SELECTED_MONTH}-${String(d).padStart(2,'0')}`;
     const isActive  = MGR_TS_MONTH_DAY === dateStr;
+    const weekday   = new Date(dateStr+'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short' });
     const isWeekend = new Date(dateStr+'T00:00:00').getDay() % 6 === 0;
     const isToday   = dateStr === today;
+    const label     = isToday ? 'Today' : `${weekday} ${d}`;
     dayChips.push(`<button data-day="${dateStr}" style="flex-shrink:0;padding:6px 14px;border-radius:20px;
       border:1px solid ${isActive?'transparent':isToday?'#4f8ef7':'var(--border)'};
       background:${isActive?'linear-gradient(135deg,#f59e0b,#fbbf24)':'var(--surface2)'};
       color:${isActive?'#fff':isWeekend?'#a78bfa':'var(--txt1)'};
-      font-size:11px;font-weight:${isActive?'700':'500'};cursor:pointer;white-space:nowrap;transition:all .15s;">${isToday?'Today':d}</button>`);
+      font-size:11px;font-weight:${isActive?'700':'500'};cursor:pointer;white-space:nowrap;transition:all .15s;">${label}</button>`);
   }
 
   bar.innerHTML = allChip + dayChips.join('');
@@ -754,6 +756,47 @@ function renderMgrTsContent() {
   `;
 
   renderMgrTsPager(totalPages);
+
+  // Event delegation on the container itself (not per-button) since
+  // buildMgrTsDateSection's rows are rebuilt on every render — a
+  // wired-flag guard means this is attached exactly once, ever, on
+  // this fixed #mgrTsContent element, instead of accumulating a new
+  // duplicate listener each time renderMgrTsContent runs.
+  if (!content.dataset.wired) {
+    content.dataset.wired = '1';
+    content.addEventListener('click', e => {
+      const entryBtn = e.target.closest('.mgr-ts-force-entry');
+      if (entryBtn) {
+        openForceEntry(entryBtn.dataset.empId, entryBtn.dataset.empName, entryBtn.dataset.date, () => renderManagerPortal());
+        return;
+      }
+      const leaveBtn = e.target.closest('.mgr-ts-force-leave');
+      if (leaveBtn) {
+        applyMgrTsForceLeave(leaveBtn, leaveBtn.dataset.empId, leaveBtn.dataset.empName, leaveBtn.dataset.date);
+      }
+    });
+  }
+}
+
+// Force Leave here is a single lightweight action (unlike Force
+// Entry, which opens its own full page) — same forceLeave backend
+// action teamleader.js's applyTLLeave already uses. Updates MGR_DATA
+// locally so the Timesheet view reflects it immediately, instead of
+// requiring a full reload of everyone's history.
+async function applyMgrTsForceLeave(btn, empId, empName, dateStr) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = '…';
+  try {
+    await sheetGET({ action: 'forceLeave', data: encodeURIComponent(JSON.stringify({ uid: empId, date: dateStr })) });
+    MGR_DATA.push({ empId, empName, date: dateStr, status: 'Leave', hours: '0h', slot: '', project: '', notes: 'Force leave applied by manager' });
+    toast?.('s', 'Leave applied', `${empName} marked on leave for ${dateStr}`);
+    renderMgrTsContent();
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = original;
+    toast?.('e', 'Failed', err.message);
+  }
 }
 
 // One date's section — a header (date, employee count, total hours)
@@ -782,22 +825,94 @@ function buildMgrTsDateSection(dateStr, entries) {
     if (!byEmp[e.empId]) byEmp[e.empId] = { empName: e.empName || e.empId, rows: [] };
     byEmp[e.empId].rows.push(e);
   });
-  const empIds = Object.keys(byEmp).sort((a,b) => byEmp[a].empName.localeCompare(byEmp[b].empName));
 
-  const rowsHtml = empIds.map(empId => {
-    const { empName, rows } = byEmp[empId];
-    const empHours = calcHours(rows);
+  // When no specific-employee filter is active, show EVERY employee
+  // for this date — including those who logged nothing that day —
+  // rather than only the ones who happened to have an entry. Makes
+  // it immediately visible who hasn't logged their morning/evening
+  // slots, not just who has. If a specific employee IS selected in
+  // the filter, entries is already scoped to just them upstream, so
+  // this naturally reduces to showing only that one person.
+  let displayEmpIds;
+  if (MGR_TS_EMP_FILTER) {
+    displayEmpIds = Object.keys(byEmp);
+  } else {
+    displayEmpIds = MGR_EMPLOYEES.filter(emp => emp.active).map(emp => emp.id);
+    Object.keys(byEmp).forEach(id => { if (!displayEmpIds.includes(id)) displayEmpIds.push(id); }); // stale/former employee with an entry but no current roster row
+  }
+
+  const empNameFor = empId => {
+    if (byEmp[empId]) return byEmp[empId].empName;
+    const emp = MGR_EMPLOYEES.find(e => e.id === empId);
+    return emp ? emp.name : empId;
+  };
+
+  const sortedEmpIds = displayEmpIds.slice().sort((a,b) => empNameFor(a).localeCompare(empNameFor(b)));
+
+  const rowsHtml = sortedEmpIds.map(empId => {
+    const empName  = empNameFor(empId);
     const empColor = mgrColorForKey(empName);
     const initials = empName.trim().slice(0, 2).toUpperCase();
+    const entryData = byEmp[empId];
+
+    if (!entryData) {
+      return `
+        <div style="padding:10px 0;border-bottom:1px solid var(--border);opacity:.75;min-width:0;overflow:hidden;">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0;">
+            <div style="width:26px;height:26px;border-radius:50%;background:${empColor};flex-shrink:0;
+              display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;color:#fff;">${esc(initials)}</div>
+            <span style="font-size:13px;font-weight:700;color:var(--txt1);flex:1 1 auto;min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(empName)}</span>
+            <span style="font-size:11px;font-style:italic;color:var(--txt2);flex-shrink:0;">No entries logged</span>
+            <button class="pbtn mgr-ts-force-entry" data-emp-id="${esc(empId)}" data-emp-name="${esc(empName)}" data-date="${esc(dateStr)}" style="flex-shrink:0;">Force Entry</button>
+            <button class="pbtn mgr-ts-force-leave" data-emp-id="${esc(empId)}" data-emp-name="${esc(empName)}" data-date="${esc(dateStr)}" style="flex-shrink:0;">Force Leave</button>
+          </div>
+        </div>`;
+    }
+
+    const { rows } = entryData;
+    const empHours = calcHours(rows);
+
+    // Quick per-slot totals — sums every Morning entry's hours
+    // together, every Afternoon entry's hours together, etc. (an
+    // employee can have more than one entry in the same slot), so
+    // there's a one-glance answer to "how much in the morning vs.
+    // the afternoon" without manually adding up each row below.
+    const slotHourTotals = {};
+    rows.forEach(e => {
+      if (e.status === 'Leave' || e.status === 'Holiday') return;
+      if (!(e.timeIn && e.timeOut)) return; // same "real times only" rule as the per-entry slot badge
+      const key = e.slot;
+      if (!key) return;
+      slotHourTotals[key] = (slotHourTotals[key] || 0) + parseH(e.hours);
+    });
+    // Only worth showing when there's more than one slot involved —
+    // with just one (e.g. a single Morning entry), this would just
+    // repeat the exact same "Morning: 3h 23m" the entry row right
+    // below it already says.
+    const slotSummaryHtml = Object.keys(slotHourTotals).length > 1
+      ? ['morning', 'afternoon', 'extended']
+          .filter(key => slotHourTotals[key] > 0)
+          .map(key => {
+            const meta = { morning: { icon: '🌅', label: 'Morning' }, afternoon: { icon: '☀️', label: 'Afternoon' }, extended: { icon: '🌙', label: 'Extended' } }[key];
+            return `<span style="white-space:nowrap;">${meta.icon} ${meta.label}: <strong style="color:var(--txt1);">${fh(slotHourTotals[key])}</strong></span>`;
+          }).join('<span style="color:var(--border-md);">·</span>')
+      : '';
 
     const entryRows = rows.map(e => {
       const isLeave   = e.status === 'Leave';
       const isHoliday = e.status === 'Holiday';
       const projectLabel = isLeave ? '🏖️ Leave' : isHoliday ? '🎉 Holiday' : (e.project || '—');
       const projectColor = isLeave ? '#fbbf24' : isHoliday ? '#9ca3af' : mgrColorForKey(e.project || '—');
+      const hasRealTimes = !!(e.timeIn && e.timeOut);
+      const slotMeta = hasRealTimes ? { morning: { icon: '🌅', label: 'Morning' }, afternoon: { icon: '☀️', label: 'Afternoon' }, extended: { icon: '🌙', label: 'Extended' } }[e.slot] : null;
+      const slotBadge = slotMeta
+        ? `<span style="flex:0 0 auto;font-size:9.5px;font-weight:700;color:var(--txt2);background:var(--surface2);
+            border:1px solid var(--border);border-radius:10px;padding:2px 8px;white-space:nowrap;">${slotMeta.icon} ${slotMeta.label}</span>`
+        : '';
       return `
         <div style="display:flex;align-items:center;gap:10px;padding:4px 0;font-size:12px;flex-wrap:wrap;">
-          <span style="flex:0 0 170px;color:${projectColor};font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(projectLabel)}</span>
+          ${slotBadge}
+          <span style="flex:0 1 170px;min-width:80px;color:${projectColor};font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(projectLabel)}</span>
           <span style="flex:0 0 70px;color:var(--txt2);text-align:right;">${(isLeave||isHoliday) ? '—' : fh(parseH(e.hours))}</span>
           <span style="flex:1;min-width:0;color:var(--txt2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(e.notes||'')}">${e.notes ? esc(e.notes) : ''}</span>
         </div>`;
@@ -805,12 +920,13 @@ function buildMgrTsDateSection(dateStr, entries) {
 
     return `
       <div style="padding:10px 0;border-bottom:1px solid var(--border);">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:${slotSummaryHtml ? '2px' : '4px'};">
           <div style="width:26px;height:26px;border-radius:50%;background:${empColor};flex-shrink:0;
             display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;color:#fff;">${esc(initials)}</div>
-          <span style="font-size:13px;font-weight:700;color:var(--txt1);flex:1;">${esc(empName)}</span>
+          <span style="font-size:13px;font-weight:700;color:var(--txt1);flex:1 1 auto;min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(empName)}</span>
           <span style="font-size:12px;font-weight:700;color:var(--a1);">${fh(empHours)}</span>
         </div>
+        ${slotSummaryHtml ? `<div style="padding-left:36px;margin-bottom:6px;font-size:11px;color:var(--txt2);display:flex;gap:8px;flex-wrap:wrap;">${slotSummaryHtml}</div>` : ''}
         <div style="padding-left:36px;">${entryRows}</div>
       </div>`;
   }).join('');
