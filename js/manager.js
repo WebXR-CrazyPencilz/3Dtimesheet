@@ -36,9 +36,10 @@ let MGR_SELECTED_MONTH = '';
 // from Employees tab's MGR_RANGE/MGR_DAY_OFFSET/MGR_SELECTED_MONTH
 // above, so switching the date range on one tab doesn't silently
 // change what the other tab shows when you navigate back to it.
-let MGR_TS_RANGE          = 'week';
+let MGR_TS_RANGE          = 'day15';
 let MGR_TS_DAY_OFFSET     = 0;
 let MGR_TS_SELECTED_MONTH = '';
+let MGR_TS_MONTH_DAY      = ''; // 'YYYY-MM-DD' — a specific day within the selected month; '' = whole month
 let MGR_TS_EMP_FILTER     = '';
 let MGR_TS_SEARCH         = '';
 let MGR_TS_PAGE           = 0;
@@ -483,17 +484,15 @@ function buildEmpCard(emp) {
 // tab's own MGR_RANGE/MGR_DAY_OFFSET/MGR_SELECTED_MONTH.
 // ══════════════════════════════════════════════════
 function getMgrTimesheetFiltered() {
-  const tod = todayStr(), ws = weekStart();
   let rows;
-  if (MGR_TS_RANGE === 'day15') {
+  if (MGR_TS_RANGE === 'month') {
+    rows = MGR_TS_MONTH_DAY
+      ? MGR_DATA.filter(e => e.date === MGR_TS_MONTH_DAY)
+      : MGR_DATA.filter(e => e.date.startsWith(MGR_TS_SELECTED_MONTH));
+  } else {
+    // 'day15' — the only other/default mode now
     const d = getLast15Days()[MGR_TS_DAY_OFFSET];
     rows = MGR_DATA.filter(e => e.date === d);
-  } else if (MGR_TS_RANGE === 'week') {
-    rows = MGR_DATA.filter(e => e.date >= ws && e.date <= tod);
-  } else if (MGR_TS_RANGE === 'month') {
-    rows = MGR_DATA.filter(e => e.date.startsWith(MGR_TS_SELECTED_MONTH));
-  } else {
-    rows = MGR_DATA.slice(); // 'all'
   }
 
   if (MGR_TS_EMP_FILTER) rows = rows.filter(e => e.empId === MGR_TS_EMP_FILTER);
@@ -508,14 +507,31 @@ function getMgrTimesheetFiltered() {
   return rows;
 }
 
+// One color per range mode, used for its active pill state and its
+// section's accent border below — purely visual, makes the three
+// tiers (day-by-day / month / all-time) easy to tell apart at a
+// glance instead of every mode looking identical.
+const MGR_TS_RANGE_COLORS = {
+  day15: { bg: 'linear-gradient(135deg,#4f8ef7,#38bdf8)', fg: '#4f8ef7' },
+  month: { bg: 'linear-gradient(135deg,#f59e0b,#fbbf24)', fg: '#f59e0b' },
+};
+
 function renderMgrTimesheetTab(content) {
   content.innerHTML = `
     <div class="mgr-controls">
-      <div class="chart-range" id="mgrTsRange">
-        <button class="rbtn${MGR_TS_RANGE==='day15'?' active':''}"  data-range="day15">15 Days</button>
-        <button class="rbtn${MGR_TS_RANGE==='week'?' active':''}"   data-range="week">This Week</button>
-        <button class="rbtn${MGR_TS_RANGE==='month'?' active':''}"  data-range="month">This Month</button>
-        <button class="rbtn${MGR_TS_RANGE==='all'?' active':''}"    data-range="all">All Time</button>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;" id="mgrTsRange">
+        ${[
+          { id:'day15', label:'📅 15 Days' },
+          { id:'month', label:'📆 This Month' },
+        ].map(r => {
+          const active = MGR_TS_RANGE === r.id;
+          const c = MGR_TS_RANGE_COLORS[r.id];
+          return `<button class="mgr-ts-rbtn" data-range="${r.id}" style="padding:7px 14px;border-radius:20px;
+            border:1px solid ${active ? 'transparent' : 'var(--border-md)'};
+            background:${active ? c.bg : 'var(--surface2)'};
+            color:${active ? '#fff' : 'var(--txt2)'};
+            font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:all .15s;">${r.label}</button>`;
+        }).join('')}
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
         <select id="mgrTsEmpFilter" class="filt">
@@ -527,26 +543,25 @@ function renderMgrTimesheetTab(content) {
     </div>
 
     <div id="mgrTsDayScroll" style="display:${MGR_TS_RANGE==='day15'?'flex':'none'};
-      gap:6px;margin-bottom:1rem;overflow-x:auto;padding-bottom:4px;"></div>
+      gap:6px;margin-bottom:1rem;overflow-x:auto;padding-bottom:4px;min-width:0;"></div>
 
     <div id="mgrTsMonthPicker" style="display:${MGR_TS_RANGE==='month'?'flex':'none'};
-      gap:8px;margin-bottom:1rem;overflow-x:auto;padding-bottom:4px;"></div>
+      gap:8px;margin-bottom:1rem;align-items:center;min-width:0;"></div>
+
+    <div id="mgrTsMonthDayScroll" style="display:${MGR_TS_RANGE==='month'?'flex':'none'};
+      gap:6px;margin-bottom:1rem;overflow-x:auto;padding-bottom:4px;min-width:0;"></div>
 
     <div id="mgrTsContent"></div>
   `;
 
   $('mgrTsRange').addEventListener('click', e => {
-    const btn = e.target.closest('.rbtn');
+    const btn = e.target.closest('.mgr-ts-rbtn');
     if (!btn) return;
     MGR_TS_RANGE = btn.dataset.range;
     MGR_TS_DAY_OFFSET = 0;
+    MGR_TS_MONTH_DAY = '';
     MGR_TS_PAGE = 0;
-    $('mgrTsRange').querySelectorAll('.rbtn').forEach(b => b.classList.toggle('active', b===btn));
-    $('mgrTsDayScroll').style.display   = MGR_TS_RANGE === 'day15' ? 'flex' : 'none';
-    $('mgrTsMonthPicker').style.display = MGR_TS_RANGE === 'month' ? 'flex' : 'none';
-    if (MGR_TS_RANGE === 'day15') buildMgrTsDayScrollBar();
-    if (MGR_TS_RANGE === 'month') buildMgrTsMonthPicker();
-    renderMgrTsContent();
+    renderMgrTimesheetTab(content); // full re-render — rebuilds the pills' active colors and swaps which picker shows
   });
 
   $('mgrTsEmpFilter').addEventListener('change', e => {
@@ -562,7 +577,7 @@ function renderMgrTimesheetTab(content) {
   });
 
   if (MGR_TS_RANGE === 'day15') buildMgrTsDayScrollBar();
-  if (MGR_TS_RANGE === 'month') buildMgrTsMonthPicker();
+  if (MGR_TS_RANGE === 'month') { buildMgrTsMonthPicker(); buildMgrTsMonthDayScrollBar(); }
   renderMgrTsContent();
 }
 
@@ -572,11 +587,15 @@ function buildMgrTsDayScrollBar() {
   bar.innerHTML = days.map((d,i) => {
     const isActive  = i===MGR_TS_DAY_OFFSET;
     const isWeekend = new Date(d+'T00:00:00').getDay()%6===0;
-    return `<button data-offset="${i}" style="flex-shrink:0;padding:5px 14px;border-radius:20px;
-      border:1px solid ${isActive?'var(--a1)':'var(--border)'};
-      background:${isActive?'var(--a1)':'var(--surface2)'};
+    // "Today"/"Yesterday" for the two most recent chips, weekday+date
+    // for everything else — matches getLast15Days()'s own ordering
+    // (index 0 = today, going backward).
+    const label = i === 0 ? 'Today' : i === 1 ? 'Yesterday' : fmtDateShort(d);
+    return `<button data-offset="${i}" style="flex-shrink:0;padding:6px 14px;border-radius:20px;
+      border:1px solid ${isActive?'transparent':'var(--border)'};
+      background:${isActive?'linear-gradient(135deg,#4f8ef7,#38bdf8)':'var(--surface2)'};
       color:${isActive?'#fff':isWeekend?'#a78bfa':'var(--txt1)'};
-      font-size:11px;cursor:pointer;white-space:nowrap;">${fmtDateShort(d)}</button>`;
+      font-size:11px;font-weight:${isActive?'700':'500'};cursor:pointer;white-space:nowrap;transition:all .15s;">${label}</button>`;
   }).join('');
   bar.querySelectorAll('button').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -586,32 +605,122 @@ function buildMgrTsDayScrollBar() {
       renderMgrTsContent();
     });
   });
+
+  // A normal mouse wheel only scrolls vertically by default — this
+  // strip is horizontal, so without this, scrolling it on desktop
+  // would require holding Shift (which most people never discover).
+  // Rebuilding innerHTML above already dropped any previous listener
+  // on this element, so this one only ever gets attached once per
+  // build, not stacking up on every re-render.
+  if (!bar.dataset.wheelWired) {
+    bar.dataset.wheelWired = '1';
+    bar.addEventListener('wheel', e => {
+      if (e.deltaY === 0) return; // already a horizontal gesture (trackpad) — let it through untouched
+      e.preventDefault();
+      bar.scrollLeft += e.deltaY;
+    }, { passive: false });
+  }
+}
+
+function stepMgrTsMonth(dir) {
+  const [y, m] = MGR_TS_SELECTED_MONTH.split('-').map(Number);
+  const next = new Date(y, (m - 1) + dir, 1);
+  const nextVal = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}`;
+  if (nextVal > todayStr().slice(0, 7)) return; // never step past the current month into the future
+  MGR_TS_SELECTED_MONTH = nextVal;
+  MGR_TS_MONTH_DAY = ''; // switching months always drops back to "whole month" view
+  MGR_TS_PAGE = 0;
+  buildMgrTsMonthPicker();
+  buildMgrTsMonthDayScrollBar();
+  renderMgrTsContent();
 }
 
 function buildMgrTsMonthPicker() {
   const picker = $('mgrTsMonthPicker'); if (!picker) return;
-  const months = [];
-  const now = new Date();
-  for (let i=0;i<12;i++){
-    const d=new Date(now.getFullYear(),now.getMonth()-i,1);
-    months.push({val:toLocalDateStr(d).slice(0,7),label:d.toLocaleDateString('en-IN',{month:'short',year:'numeric'})});
-  }
+  const isCurrentMonth = MGR_TS_SELECTED_MONTH >= todayStr().slice(0, 7);
+
   picker.innerHTML = `
-    <div style="display:flex;gap:6px;overflow-x:auto;flex:1;padding-bottom:2px;">
-      ${months.map(m=>`<button data-month="${m.val}" style="flex-shrink:0;padding:5px 14px;border-radius:20px;
-        border:1px solid ${m.val===MGR_TS_SELECTED_MONTH?'var(--a1)':'var(--border)'};
-        background:${m.val===MGR_TS_SELECTED_MONTH?'var(--a1)':'var(--surface2)'};
-        color:${m.val===MGR_TS_SELECTED_MONTH?'#fff':'var(--txt1)'};
-        font-size:11px;cursor:pointer;white-space:nowrap;">${m.label}</button>`).join('')}
-    </div>`;
-  picker.querySelectorAll('button[data-month]').forEach(btn => {
+    <button id="mgrTsMonthPrev" class="pbtn" title="Previous month">‹</button>
+    <input type="month" id="mgrTsMonthInput" value="${esc(MGR_TS_SELECTED_MONTH)}" max="${esc(todayStr().slice(0,7))}"
+      style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;
+      color:var(--txt1);font-size:13px;padding:8px 12px;cursor:pointer;"/>
+    <button id="mgrTsMonthNext" class="pbtn" ${isCurrentMonth ? 'disabled' : ''} title="Next month">›</button>`;
+
+  const input = $('mgrTsMonthInput');
+  input.addEventListener('change', e => {
+    MGR_TS_SELECTED_MONTH = e.target.value || todayStr().slice(0,7);
+    MGR_TS_MONTH_DAY = ''; // new month picked directly — drop back to whole-month view
+    MGR_TS_PAGE = 0;
+    buildMgrTsMonthPicker();
+    buildMgrTsMonthDayScrollBar();
+    renderMgrTsContent();
+  });
+
+  $('mgrTsMonthPrev').addEventListener('click', () => stepMgrTsMonth(-1));
+  $('mgrTsMonthNext').addEventListener('click', () => stepMgrTsMonth(1));
+
+  // Scroll-to-change kept as a bonus for anyone who tries it, but the
+  // ‹ › buttons above are the actual visible, discoverable control —
+  // an invisible wheel-only interaction on a plain box gave no hint
+  // that scrolling did anything.
+  input.addEventListener('wheel', e => {
+    e.preventDefault();
+    stepMgrTsMonth(e.deltaY > 0 ? 1 : -1);
+  }, { passive: false });
+}
+
+// Every day of the currently selected month, as a horizontally
+// scrollable chip strip — same visual language as the 15 Days strip
+// (colored active pill, weekend days tinted, wheel-scrollable). An
+// "All Month" chip at the front resets back to the whole-month view;
+// clicking any day chip narrows the list below to just that one day.
+function buildMgrTsMonthDayScrollBar() {
+  const bar = $('mgrTsMonthDayScroll'); if (!bar) return;
+
+  const [y, m] = MGR_TS_SELECTED_MONTH.split('-').map(Number);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const today = todayStr();
+  const isCurrentMonth = MGR_TS_SELECTED_MONTH === today.slice(0, 7);
+  const lastDay = isCurrentMonth ? Number(today.slice(8, 10)) : daysInMonth; // don't show future days in the current month
+
+  const allChip = `<button data-day="" style="flex-shrink:0;padding:6px 14px;border-radius:20px;
+    border:1px solid ${!MGR_TS_MONTH_DAY?'transparent':'var(--border)'};
+    background:${!MGR_TS_MONTH_DAY?'linear-gradient(135deg,#f59e0b,#fbbf24)':'var(--surface2)'};
+    color:${!MGR_TS_MONTH_DAY?'#fff':'var(--txt1)'};
+    font-size:11px;font-weight:${!MGR_TS_MONTH_DAY?'700':'500'};cursor:pointer;white-space:nowrap;transition:all .15s;">All Month</button>`;
+
+  const dayChips = [];
+  for (let d = 1; d <= lastDay; d++) {
+    const dateStr = `${MGR_TS_SELECTED_MONTH}-${String(d).padStart(2,'0')}`;
+    const isActive  = MGR_TS_MONTH_DAY === dateStr;
+    const isWeekend = new Date(dateStr+'T00:00:00').getDay() % 6 === 0;
+    const isToday   = dateStr === today;
+    dayChips.push(`<button data-day="${dateStr}" style="flex-shrink:0;padding:6px 14px;border-radius:20px;
+      border:1px solid ${isActive?'transparent':isToday?'#4f8ef7':'var(--border)'};
+      background:${isActive?'linear-gradient(135deg,#f59e0b,#fbbf24)':'var(--surface2)'};
+      color:${isActive?'#fff':isWeekend?'#a78bfa':'var(--txt1)'};
+      font-size:11px;font-weight:${isActive?'700':'500'};cursor:pointer;white-space:nowrap;transition:all .15s;">${isToday?'Today':d}</button>`);
+  }
+
+  bar.innerHTML = allChip + dayChips.join('');
+
+  bar.querySelectorAll('button').forEach(btn => {
     btn.addEventListener('click', () => {
-      MGR_TS_SELECTED_MONTH = btn.dataset.month;
+      MGR_TS_MONTH_DAY = btn.dataset.day;
       MGR_TS_PAGE = 0;
-      buildMgrTsMonthPicker();
+      buildMgrTsMonthDayScrollBar();
       renderMgrTsContent();
     });
   });
+
+  if (!bar.dataset.wheelWired) {
+    bar.dataset.wheelWired = '1';
+    bar.addEventListener('wheel', e => {
+      if (e.deltaY === 0) return;
+      e.preventDefault();
+      bar.scrollLeft += e.deltaY;
+    }, { passive: false });
+  }
 }
 
 function renderMgrTsContent() {
@@ -650,6 +759,18 @@ function renderMgrTsContent() {
 // One date's section — a header (date, employee count, total hours)
 // followed by one block per employee who logged anything that day,
 // each showing every entry they made (project/status, hours, notes).
+// Consistent color per employee/project name — same hashing approach
+// used throughout this app (Client-Project.js's getColorForKey,
+// emp-detail.js's getProjectColor) so the same name always renders
+// in the same color everywhere. Self-contained here rather than
+// depending on either of those other files' load order.
+function mgrColorForKey(key) {
+  const str = String(key || '');
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
+  return MGR_PALETTE[hash % MGR_PALETTE.length];
+}
+
 function buildMgrTsDateSection(dateStr, entries) {
   const dateLabel = new Date(dateStr+'T00:00:00').toLocaleDateString('en-IN',
     { weekday:'long', day:'numeric', month:'short', year:'numeric' });
@@ -666,14 +787,17 @@ function buildMgrTsDateSection(dateStr, entries) {
   const rowsHtml = empIds.map(empId => {
     const { empName, rows } = byEmp[empId];
     const empHours = calcHours(rows);
+    const empColor = mgrColorForKey(empName);
+    const initials = empName.trim().slice(0, 2).toUpperCase();
 
     const entryRows = rows.map(e => {
       const isLeave   = e.status === 'Leave';
       const isHoliday = e.status === 'Holiday';
-      const projectLabel = isLeave ? '🏖️ Leave' : isHoliday ? '🎉 Holiday' : esc(e.project || '—');
+      const projectLabel = isLeave ? '🏖️ Leave' : isHoliday ? '🎉 Holiday' : (e.project || '—');
+      const projectColor = isLeave ? '#fbbf24' : isHoliday ? '#9ca3af' : mgrColorForKey(e.project || '—');
       return `
         <div style="display:flex;align-items:center;gap:10px;padding:4px 0;font-size:12px;flex-wrap:wrap;">
-          <span style="flex:0 0 170px;color:var(--txt1);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${projectLabel}</span>
+          <span style="flex:0 0 170px;color:${projectColor};font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(projectLabel)}</span>
           <span style="flex:0 0 70px;color:var(--txt2);text-align:right;">${(isLeave||isHoliday) ? '—' : fh(parseH(e.hours))}</span>
           <span style="flex:1;min-width:0;color:var(--txt2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(e.notes||'')}">${e.notes ? esc(e.notes) : ''}</span>
         </div>`;
@@ -681,18 +805,22 @@ function buildMgrTsDateSection(dateStr, entries) {
 
     return `
       <div style="padding:10px 0;border-bottom:1px solid var(--border);">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
-          <span style="font-size:13px;font-weight:700;color:var(--txt1);">${esc(empName)}</span>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+          <div style="width:26px;height:26px;border-radius:50%;background:${empColor};flex-shrink:0;
+            display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;color:#fff;">${esc(initials)}</div>
+          <span style="font-size:13px;font-weight:700;color:var(--txt1);flex:1;">${esc(empName)}</span>
           <span style="font-size:12px;font-weight:700;color:var(--a1);">${fh(empHours)}</span>
         </div>
-        ${entryRows}
+        <div style="padding-left:36px;">${entryRows}</div>
       </div>`;
   }).join('');
 
   return `
     <div style="margin-bottom:1.5rem;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding-bottom:8px;border-bottom:2px solid var(--border-md);">
-        <span style="font-size:14px;font-weight:800;color:var(--txt1);">${esc(dateLabel)}</span>
+        <span style="display:inline-flex;align-items:center;font-size:12px;font-weight:700;color:#38bdf8;
+          background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.3);
+          border-radius:8px;padding:4px 12px;">${esc(dateLabel)}</span>
         <span style="font-size:12px;color:var(--txt2);">${empCount} employee${empCount!==1?'s':''} · ${fh(totalHours)} total</span>
       </div>
       ${rowsHtml}
