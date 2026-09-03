@@ -1552,7 +1552,7 @@ async function openProjectDetail(content, projectId, opts = {}) {
 
   const isNew = !projectId;
   const project = isNew
-    ? { projectId: '', projectName: '', clientId: presetClientId, status: 'In Progress', startDate: '', endDate: '' }
+    ? { projectId: '', projectName: '', clientId: presetClientId, status: 'In Progress', startDate: '', endDate: '', plannedViews: 0, completedViews: 0 }
     : CP_PROJECTS.find(p => p.projectId === projectId);
 
   if (!isNew && !project) { toast?.('e', 'Project not found', projectId); return; }
@@ -1614,6 +1614,20 @@ async function openProjectDetail(content, projectId, opts = {}) {
         <div class="cp-form-field">
           <label class="cp-flabel">End Date</label>
           <input class="cp-finput" id="cpEndDate" type="date" value="${isoDateOrBlank(project.endDate)}" ${canEdit ? '' : 'disabled'}/>
+        </div>
+
+        <div class="cp-form-field">
+          <label class="cp-flabel">Views Planned</label>
+          <input class="cp-finput" id="cpPlannedViews" type="number" step="any" min="0"
+            value="${project.plannedViews !== undefined && project.plannedViews !== '' ? esc(String(project.plannedViews)) : '0'}"
+            ${isManager ? '' : 'disabled'}/>
+        </div>
+
+        <div class="cp-form-field">
+          <label class="cp-flabel">Views Completed</label>
+          <input class="cp-finput" id="cpCompletedViews" type="number" step="any" min="0"
+            value="${project.completedViews !== undefined && project.completedViews !== '' ? esc(String(project.completedViews)) : '0'}"
+            ${canEdit ? '' : 'disabled'}/>
         </div>
 
         ${isManager ? `
@@ -1835,6 +1849,24 @@ async function saveProjectFromForm(content, isNew, originalProject, onDone) {
   payload.status       = $('cpStatus').value;
   payload.startDate    = $('cpStartDate').value;
   payload.endDate      = $('cpEndDate').value;
+
+  // Views Planned — always rendered so everyone can see the current
+  // value, but only actually enabled for Manager (matching the
+  // backend, which only accepts plannedViews from the 'manager'
+  // role — a Team Leader's saveProjectMaster call silently drops it).
+  // Reading a disabled input's .value still works fine in the DOM,
+  // but we gate on the element not being disabled here too, so a
+  // stale/unexpected value never gets sent from a role that can't
+  // actually change it.
+  const plannedViewsEl = $('cpPlannedViews');
+  if (plannedViewsEl && !plannedViewsEl.disabled) payload.plannedViews = parseFloat(plannedViewsEl.value) || 0;
+
+  // Views Completed — enabled for both Manager and Team Leader (the
+  // backend accepts completedViews from either role), disabled (and
+  // thus not sent) for a plain viewer.
+  const completedViewsEl = $('cpCompletedViews');
+  if (completedViewsEl && !completedViewsEl.disabled) payload.completedViews = parseFloat(completedViewsEl.value) || 0;
+
   // Project Constant — only present in the form (and thus in this
   // payload) for the Manager role; the backend also independently
   // ignores it from anyone else, so this is belt-and-suspenders, not
