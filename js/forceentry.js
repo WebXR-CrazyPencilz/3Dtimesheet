@@ -46,7 +46,16 @@ const FE_SLOT_META = {
   afternoon: { label: 'Afternoon', icon: '☀️',  defaultIn: '13:45', defaultOut: '19:30', minTime: '13:30', maxTime: '20:00', displayMin: '13:45' },
 };
 
-const FE_TASKS = ['Pre-Work','Modelling & Texturing','lighting & Rendering','Web Development','Editing & Greeding','Unreal Engine','Training R&D'];
+// Kept identical to form.js's task list (the employee-side Timesheet
+// form) — these two lists had drifted apart: this one was missing
+// "2D FloorPlan" entirely, had "Editing & Greeding" (typo for
+// "Grading"), "Unreal Engine" instead of "Unreal App Development",
+// and an extra "Pre-Work" that doesn't exist in form.js. An employee
+// entry saved with "2D FloorPlan" would show up here (pre-selected
+// via the `existing?.task` match) but silently vanish as a pickable
+// option the moment someone chose anything else, since it wasn't
+// actually in this array. If form.js's list changes, update both.
+const FE_TASKS = ['Modelling & Texturing','lighting & Rendering', 'Web Development','2D FloorPlan', 'Editing & Grading', 'Unreal App Development', 'Training R&D'];
 
 // Who is entering this — Manager or Team Leader — derived from the
 // same session globals auth.js already maintains. No new auth logic.
