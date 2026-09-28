@@ -1620,7 +1620,7 @@ async function openProjectDetail(content, projectId, opts = {}) {
           <label class="cp-flabel">Views Planned</label>
           <input class="cp-finput" id="cpPlannedViews" type="number" step="any" min="0"
             value="${project.plannedViews !== undefined && project.plannedViews !== '' ? esc(String(project.plannedViews)) : '0'}"
-            ${isManager ? '' : 'disabled'}/>
+            ${canEdit ? '' : 'disabled'}/>
         </div>
 
         <div class="cp-form-field">
@@ -1630,7 +1630,7 @@ async function openProjectDetail(content, projectId, opts = {}) {
             ${canEdit ? '' : 'disabled'}/>
         </div>
 
-        ${isManager ? `
+        ${canEdit ? `
         <div class="cp-form-field">
           <label class="cp-flabel">Project Constant</label>
           <input class="cp-finput" id="cpConstant" type="number" step="any" min="0"
@@ -1851,13 +1851,11 @@ async function saveProjectFromForm(content, isNew, originalProject, onDone) {
   payload.endDate      = $('cpEndDate').value;
 
   // Views Planned — always rendered so everyone can see the current
-  // value, but only actually enabled for Manager (matching the
-  // backend, which only accepts plannedViews from the 'manager'
-  // role — a Team Leader's saveProjectMaster call silently drops it).
-  // Reading a disabled input's .value still works fine in the DOM,
-  // but we gate on the element not being disabled here too, so a
-  // stale/unexpected value never gets sent from a role that can't
-  // actually change it.
+  // value, and enabled for both Manager and Team Leader (canEdit).
+  // The backend's saveProjectMaster must accept plannedViews in its
+  // Team Leader branch too, otherwise it is silently dropped there.
+  // We still gate on the element not being disabled, so a stale/
+  // unexpected value is never sent from a role that can't change it.
   const plannedViewsEl = $('cpPlannedViews');
   if (plannedViewsEl && !plannedViewsEl.disabled) payload.plannedViews = parseFloat(plannedViewsEl.value) || 0;
 
@@ -1867,10 +1865,11 @@ async function saveProjectFromForm(content, isNew, originalProject, onDone) {
   const completedViewsEl = $('cpCompletedViews');
   if (completedViewsEl && !completedViewsEl.disabled) payload.completedViews = parseFloat(completedViewsEl.value) || 0;
 
-  // Project Constant — only present in the form (and thus in this
-  // payload) for the Manager role; the backend also independently
-  // ignores it from anyone else, so this is belt-and-suspenders, not
-  // the only enforcement.
+  // Project Constant — present in the form (and thus in this payload)
+  // for Manager AND Team Leader (canEdit). Project Value is still
+  // Manager-only and never appears here. The backend (saveProjectMaster)
+  // is the real enforcement — a role that isn't 'manager' or 'tl'
+  // can't save at all.
   const constantEl = $('cpConstant');
   if (constantEl) payload.projectConstant = parseFloat(constantEl.value) || 0;
   if (!isNew) payload.originalProjectId = originalProject.projectId;
