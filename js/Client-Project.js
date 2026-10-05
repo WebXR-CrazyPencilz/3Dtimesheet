@@ -1392,11 +1392,12 @@ function buildProjectCard(p) {
             : `${esc(fmtCPMoney(totalCost))} cost so far`}
       </div>`;
   } else if (isTL) {
-    // Same cost-vs-budget math as Manager, computed silently — but
-    // nothing numeric ever reaches the markup. Single solid green
-    // fill while under budget (no per-employee segmentation, since
-    // that would visually leak each person's relative cost share),
-    // solid red the instant it's over. No tooltip on either state.
+    // Team Leader sees the same PROJECT-level figures as Manager —
+    // cost so far, budget, and amount over — in the label and in the
+    // over-budget tooltip. What stays hidden is anything per-employee:
+    // the bar is a single solid fill (not segmented by person) and
+    // there are no per-employee tooltips, since each person's cost
+    // share is derived from their own salary Points.
     const { totalCost } = getProjectCostBreakdown(p);
     const budget = parseFloat(p.projectConstant) || 0;
     const hasBudget = budget > 0;
@@ -1408,18 +1409,22 @@ function buildProjectCard(p) {
     if (!totalCost) {
       consumedBarHtml = `<div style="width:100%;height:100%;background:var(--border-md);"></div>`;
     } else if (isOverBudget) {
-      consumedBarHtml = `<div style="width:100%;height:100%;background:#f87171;"></div>`;
+      consumedBarHtml = `<div style="width:100%;height:100%;background:#f87171;"
+        title="${esc(fmtCPMoney(totalCost))} cost vs ${esc(fmtCPMoney(budget))} budget — over by ${esc(fmtCPMoney(totalCost - budget))}"></div>`;
     } else {
-      consumedBarHtml = `<div style="width:${fillPct}%;height:100%;background:#34d399;"></div>`;
+      consumedBarHtml = `<div style="width:${fillPct}%;height:100%;background:#34d399;"
+        title="${esc(fmtCPMoney(totalCost))} of ${esc(fmtCPMoney(budget))} budget consumed"></div>`;
     }
 
     barLabelHtml = `<div style="font-size:9px;font-weight:700;margin-bottom:3px;
         color:${isOverBudget ? '#f87171' : (totalCost > 0 && hasBudget ? '#34d399' : 'var(--txt1)')};">
         ${!totalCost
-          ? (totalHours > 0 ? 'No Points set' : 'No hours logged yet')
+          ? (totalHours > 0 ? `${esc(fmtHM(totalHours))} logged — no Points set` : 'No hours logged yet')
           : hasBudget
-            ? (isOverBudget ? 'Over budget' : 'Within budget')
-            : 'No budget set'}
+            ? (isOverBudget
+                ? `${esc(fmtCPMoney(totalCost))} cost — ${esc(fmtCPMoney(totalCost - budget))} over budget`
+                : `${esc(fmtCPMoney(totalCost))} of ${esc(fmtCPMoney(budget))} budget consumed`)
+            : `${esc(fmtCPMoney(totalCost))} cost so far`}
       </div>`;
   } else {
     consumedBarHtml = totalHours > 0
@@ -2168,10 +2173,24 @@ function renderProjectTimelineSection(project) {
   // per segment for that person's exact contribution. Replaces the
   // old month-by-month row list, which is still available in full via
   // the Team Performance day-by-day log below.
+  // Per-employee consumed Points (hours × that month's Points) —
+  // visible to Manager AND Team Leader on the Project Timeline. This is
+  // a deliberate exception to the usual Team Leader privacy boundary,
+  // made on request; it is NOT applied anywhere else in the app.
+  const showEmpPoints = CP_ROLE === 'manager' || CP_ROLE === 'tl';
+  const costByEmp = {};
+  if (showEmpPoints) {
+    getProjectCostBreakdown(project).rows.forEach(r => { costByEmp[r.empId] = r; });
+  }
+  const empPointsLabel = t => {
+    const r = costByEmp[t.empId];
+    return (r && r.hasPoints) ? fmtCPMoney(r.cost) : '—';
+  };
+
   const segmentsHtml = totals.map(t => {
     const segPct = (t.hours / totalHours) * 100;
     return `<div style="width:${segPct}%;height:100%;background:${getEmployeeColor(t.empId)};"
-      title="${esc(t.name)}: ${fmtHM(t.hours)}"></div>`;
+      title="${esc(t.name)}: ${fmtHM(t.hours)}${showEmpPoints ? ' · ' + esc(empPointsLabel(t)) + ' pts' : ''}"></div>`;
   }).join('');
 
   el.innerHTML = `
@@ -2196,7 +2215,10 @@ function renderProjectTimelineSection(project) {
                 <span style="width:7px;height:7px;border-radius:50%;background:${getEmployeeColor(t.empId)};flex-shrink:0;"></span>
                 ${esc(t.name)}
               </span>
-              <span style="color:var(--txt1);font-weight:700;">${fmtHM(t.hours)}</span>
+              <span style="display:flex;align-items:center;gap:12px;white-space:nowrap;">
+                ${showEmpPoints ? `<span style="color:#4f8ef7;font-weight:700;" title="Points consumed on this project">${esc(empPointsLabel(t))} pts</span>` : ''}
+                <span style="color:var(--txt1);font-weight:700;">${fmtHM(t.hours)}</span>
+              </span>
             </div>`).join('')}
         </div>
       </details>
